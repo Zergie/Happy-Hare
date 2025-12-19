@@ -986,7 +986,10 @@ class MmuKinematics:
             self.rails[0].setup_itersolve('cartesian_stepper_alloc', b'x')
         else:
             self.rails.append(DummyRail())
-        self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
+        if config.has_section(GEAR_STEPPER_CONFIG):
+            self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
+        else:
+            self.rails.append(DummyRail())
         self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
 
         for s in self.get_steppers():
@@ -1299,6 +1302,12 @@ class DummyRail:
         return self.endstops
 
     def set_position(self, newpos):
+        pass
+
+    def setup_itersolve(self, alloc_func, *params):
+        pass
+
+    def add_extra_endstop(self, pin, name, register=True, bind_rail_steppers=True, mcu_endstop=None):
         pass
 
 
