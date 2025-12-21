@@ -332,7 +332,7 @@ class MmuMachine:
         if index >= 0 and index < self.num_units:
             return self.units[index]
         return None
-        
+
     def get_mmu_unit_by_gate(self, gate): # Hack to allow some v4 functionality into the v3 line
         if gate >= 0 and gate < self.num_gates:
             return self.unit_by_gate[gate]
@@ -348,7 +348,7 @@ class MmuUnit:
         self.unit_index = unit_index
         self.first_gate = first_gate
         self.num_gates = num_gates
-        self.leds = None 
+        self.leds = None
 
     def manages_gate(self, gate):
         return self.first_gate <= gate < self.first_gate + self.num_gates
@@ -985,12 +985,13 @@ class MmuKinematics:
             self.rails.append(MmuLookupMultiRail(config.getsection(SELECTOR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
             self.rails[0].setup_itersolve('cartesian_stepper_alloc', b'x')
         else:
-            self.rails.append(DummyRail())
+            self.rails.append(DummyRail(config))
+
         if config.has_section(GEAR_STEPPER_CONFIG):
             self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
+            self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
         else:
-            self.rails.append(DummyRail())
-        self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
+            self.rails.append(DummyRail(config))
 
         for s in self.get_steppers():
             s.set_trapq(toolhead.get_trapq())
@@ -1286,11 +1287,13 @@ class MmuExtruderStepper(ExtruderStepper, object):
             gcmd.respond_info(msg, log=False)
 
 class DummyRail:
-    def __init__(self):
+    def __init__(self, config):
         self.steppers = []
         self.endstops = []
         self.extra_endstops = []
         self.rail_name = "Dummy"
+        self.printer = config.get_printer()
+        self.query_endstops = self.printer.load_object(config, 'query_endstops')
 
     def get_name(self):
         return self.rail_name
@@ -1304,11 +1307,26 @@ class DummyRail:
     def set_position(self, newpos):
         pass
 
-    def setup_itersolve(self, alloc_func, *params):
-        pass
-
     def add_extra_endstop(self, pin, name, register=True, bind_rail_steppers=True, mcu_endstop=None):
-        pass
+        is_virtual = 'virtual_endstop' in pin
+        if is_virtual:
+            if name not in self.virtual_endstops:
+                self.virtual_endstops.append(name)
+            else:
+                raise self.config.error("Extra virtual endstop '%s' defined more than once" % name)
+        if mcu_endstop is None:
+            ppins = self.printer.lookup_object('pins')
+            mcu_endstop = ppins.setup_pin('endstop', pin)
+        self.extra_endstops.append((mcu_endstop, name))
+        # if bind_rail_steppers:
+        #     for s in self.steppers if not is_virtual else [self.steppers[-1]]:
+        #         try:
+        #             mcu_endstop.add_stepper(s)
+        #         except Exception as e:
+        #             logging.info("MMU: Not possible to add stepper %s to endstop %s because: %s" % (s.get_name(), name, str(e)))
+        if register: # and not self.is_endstop_virtual(name):
+            self.query_endstops.register_endstop(mcu_endstop, name)
+        return mcu_endstop
 
 
 def load_config(config):

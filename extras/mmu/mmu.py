@@ -855,7 +855,8 @@ class Mmu:
         self.save_variables.allVariables[self.VARS_MMU_CALIB_BOWDEN_HOME] = bowden_home
 
         # Load gear rotation distance configuration (calibration set with MMU_CALIBRATE_GEAR) ---------------
-        self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] # TODO Should probably be per gear in case they are disimilar?
+        self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] \
+            if len(self.gear_rail.steppers) > 0 else 0 # TODO Should probably be per gear in case they are disimilar?
         self.rotation_distances = self.save_variables.allVariables.get(self.VARS_MMU_GEAR_ROTATION_DISTANCES, None)
         if self.rotation_distances:
             self.rotation_distances = [-1 if x == 0 else x for x in self.rotation_distances] # Ensure -1 value for uncalibrated
@@ -4885,7 +4886,7 @@ class Mmu:
             # Deactivate spool immediately before tip forming/cutting
             # Tip forming/cutting macros use the extruder to execute, hence
             # any retraction / de retraction moves are accounted in Spoolman.
-            # By de-activating early, the retraction performed from the macro 
+            # By de-activating early, the retraction performed from the macro
             # is deliberately not accounted in spoolman
             self._spoolman_activate_spool(0)
 
