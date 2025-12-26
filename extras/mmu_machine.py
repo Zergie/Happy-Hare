@@ -1290,6 +1290,7 @@ class DummyRail:
     def __init__(self, config):
         self.steppers = []
         self.endstops = []
+        self.virtual_endstops = []
         self.extra_endstops = []
         self.rail_name = "Dummy"
         self.printer = config.get_printer()
@@ -1327,6 +1328,15 @@ class DummyRail:
         if register: # and not self.is_endstop_virtual(name):
             self.query_endstops.register_endstop(mcu_endstop, name)
         return mcu_endstop
+
+    def get_extra_endstop(self, name):
+        for x in self.extra_endstops:
+            if x[1] == name:
+                return [x]
+        return None
+
+    def is_endstop_virtual(self, name):
+        return name in self.virtual_endstops if name else False
 
 
 def load_config(config):

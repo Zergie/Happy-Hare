@@ -341,7 +341,8 @@ class MmuESpooler:
                 return
             if self.mmu.log_enabled(Mmu.LOG_STEPPER):
                 self.mmu.log_stepper("ESPOOLER: -----> _set_pin(name=%s, value=%s) @ print_time: %.8f" % (name, value, print_time))
-            if self.is_pwm and not name.startswith('enable_'):
+            if self.is_pwm and not name.startswith('enable_')\
+                and not name.endswith('_direction_pin'):
                 mcu_pin.set_pwm(print_time, value)
             else:
                 mcu_pin.set_digital(print_time, value)
