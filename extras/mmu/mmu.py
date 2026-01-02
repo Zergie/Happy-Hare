@@ -5264,9 +5264,9 @@ class Mmu:
                 with self._wrap_sync_mode(MmuToolHead.EXTRUDER_SYNCED_TO_GEAR if motor == "gear+extruder" else MmuToolHead.EXTRUDER_ONLY_ON_GEAR if motor == "extruder" else MmuToolHead.GEAR_ONLY):
                     if homing_move != 0:
                         trig_pos = [0., 0., 0., 0.]
-                        hmove = HomingMove(self.printer, endstops, self.mmu_toolhead) \
-                            if not isinstance(self.gear_rail, mmu_machine.DummyRail) \
-                            else DummyHomingMove(self.printer, endstops, self.mmu_toolhead)
+                        hmove = DummyHomingMove(self.printer, endstops, self.mmu_toolhead) \
+                            if motor == "gear" and isinstance(self.gear_rail, mmu_machine.DummyRail) \
+                            else HomingMove(self.printer, endstops, self.mmu_toolhead)
                         init_ext_mcu_pos = self.mmu_extruder_stepper.stepper.get_mcu_position() # For non-homing extruder or if extruder not on gear rail
                         init_pos = pos[1]
                         pos[1] += dist

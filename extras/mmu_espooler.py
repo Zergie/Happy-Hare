@@ -126,7 +126,7 @@ class MmuESpooler:
             mcu_pin.setup_max_duration(0.)
             mcu_pin.setup_start_value(self.last_value, 0)
             self.motor_mcu_pins[name] = mcu_pin
-            self.last_value[name] = 0
+            self.last_value[name] = .5
 
         # Setup minimum number of gcode request queues
         self.gcrqs = {}
@@ -317,7 +317,7 @@ class MmuESpooler:
             else:
                 active_motor_name = 'respool_%d' % gate if operation == Mmu.ESPOOLER_REWIND else 'assist_%d' % gate
                 inactive_motor_name = 'assist_%d' % gate if operation == Mmu.ESPOOLER_REWIND else 'respool_%d' % gate
-                yammu_direction = (int(gate) if operation == Mmu.ESPOOLER_REWIND else (int(gate) - 1)) % 2
+                yammu_direction = (int(gate) if operation == Mmu.ESPOOLER_REWIND else (int(gate) + 1)) % 2
                 _schedule_set_pin(inactive_motor_name, 0)
                 _schedule_set_pin(active_motor_name, value)
                 _schedule_set_pin('enable_%d' % gate, 1)
