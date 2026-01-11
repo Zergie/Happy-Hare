@@ -349,6 +349,7 @@ class MmuUnit:
         self.first_gate = first_gate
         self.num_gates = num_gates
         self.leds = None
+        self.motor = None
 
     def manages_gate(self, gate):
         return self.first_gate <= gate < self.first_gate + self.num_gates
@@ -545,6 +546,38 @@ class MmuToolHead(toolhead.ToolHead, object):
 
     def get_gear_limits(self):
         return self.gear_max_velocity, self.gear_max_accel
+
+    def move(self, newpos, speed):
+        gear_rail = self.kin.rails[1]
+        if hasattr(gear_rail, 'move'):
+            gear_rail.move(newpos, speed)
+        elif isinstance(gear_rail, DummyRail):
+            velocity, accel = self.get_gear_limits()
+            distance = abs(newpos[1] - self.get_position()[1])
+
+            # distance needed to accelerate to velocity
+            d_accel = velocity**2 / (2 * accel)
+
+            # minimum distance to reach max speed and decelerate
+            d_min = 2 * d_accel
+
+            if distance >= d_min:
+                # --- trapezoidal profile ---
+                t_accel = velocity / accel
+                d_cruise = distance - d_min
+                t_cruise = d_cruise / velocity
+                move_time = 2 * t_accel + t_cruise
+            else:
+                # peak speed reached
+                v_peak = math.sqrt(distance * accel)
+                t_accel = v_peak / accel
+                move_time = 2 * t_accel
+
+            self.dwell(move_time + EPS)
+            self.set_position(newpos)
+        else:
+            super(toolhead.ToolHead, self).move(newpos, speed)
+
 
     # Gear/Extruder synchronization and stepper swapping management...
 
@@ -991,7 +1024,7 @@ class MmuKinematics:
             self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
             self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
         else:
-            self.rails.append(DummyRail(config))
+            self.rails.append(MotorRail(config))
 
         for s in self.get_steppers():
             s.set_trapq(toolhead.get_trapq())
@@ -1338,6 +1371,36 @@ class DummyRail:
     def is_endstop_virtual(self, name):
         return name in self.virtual_endstops if name else False
 
+class MotorRail(DummyRail):
+    def __init__(self, config):
+        super(MotorRail, self).__init__(config)
+        self.rail_name = "MotorRail"
+        self.mmu = None
+        self.mmu_machine = None
+        self.motors = []
+
+        self.printer.register_event_handler('klippy:connect', self.handle_connect)
+
+    def handle_connect(self):
+        self.mmu = self.printer.lookup_object('mmu')
+        self.mmu_machine = self.mmu.mmu_machine
+        self.motors = [self.printer.lookup_object('mmu_motor unit%d' % i) for i in range(self.mmu_machine.num_units)]
+
+    def get_motor(self):
+        if len(self.motors) == 1:
+            return self.motors[0]
+        else:
+            return self.motors[self.mmu.unit_selected]
+
+    def start_homing(self, endstops, speed, accel):
+        return self.get_motor().start_homing(endstops, speed, accel)
+
+    def homing_move(self, movepos, speed, probe_pos=False,
+                    triggered=True, check_triggered=True):
+        return self.get_motor().homing_move(movepos, speed, probe_pos, triggered, check_triggered)
+
+    def move(self, position, speed):
+        return self.get_motor().move(position, speed)
 
 def load_config(config):
     return MmuMachine(config)

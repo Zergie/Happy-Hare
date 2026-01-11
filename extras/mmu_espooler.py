@@ -58,7 +58,6 @@ class MmuESpooler:
             self.assist_motor_pin = config.get('assist_motor_pin_%d' % gate, None)
             self.enable_motor_pin = config.get('enable_motor_pin_%d' % gate, None)
             self.assist_trigger_pin = config.get('assist_trigger_pin_%d' % gate, None)
-            self.yammu_motor_pin = self.config.get('yammu_motor_pin_%d' % gate, None)
 
             # Setup pins
             if self.respool_motor_pin and not self._is_empty_pin(self.respool_motor_pin):
@@ -104,29 +103,9 @@ class MmuESpooler:
                     lambda eventtime, state, gate=gate: self._handle_button_advance(eventtime, state, gate)
                 )
 
-            if self.yammu_motor_pin and not self._is_empty_pin(self.yammu_motor_pin):
-                mcu_pin = ppins.setup_pin("pwm", self.yammu_motor_pin)
-                mcu_pin.setup_cycle_time(self.cycle_time, self.hardware_pwm)
-
-                name = "yammu_motor_pin_%d" % gate
-                mcu_pin.setup_max_duration(0.)
-                mcu_pin.setup_start_value(start_value, self.shutdown_value)
-                self.motor_mcu_pins[name] = mcu_pin
-                self.last_value[name] = start_value
-
             self.operation[self._key(gate)] = ('off', 0)
             self.back_to_back_burst_count[gate] = 0
             self.burst_trigger_state[gate] = 0
-
-        self.yammu_direction_pin = self.config.get('yammu_direction_pin', None)
-        if self.yammu_direction_pin and not self._is_empty_pin(self.yammu_direction_pin):
-            mcu_pin = ppins.setup_pin("digital_out", self.yammu_direction_pin)
-
-            name = "yammu_direction_pin"
-            mcu_pin.setup_max_duration(0.)
-            mcu_pin.setup_start_value(self.last_value, 0)
-            self.motor_mcu_pins[name] = mcu_pin
-            self.last_value[name] = .5
 
         # Setup minimum number of gcode request queues
         self.gcrqs = {}
@@ -310,19 +289,15 @@ class MmuESpooler:
         # None operation is special case of updating without changing operation (typically in-print assist burst)
         if operation == None or self.get_operation(gate) != (operation, value):
             if value == 0: # Stop motor
-                _schedule_set_pin('yammu_motor_pin_%d' % (int(gate) // 4), 0)
                 _schedule_set_pin('enable_%d' % gate, 0)
                 _schedule_set_pin('respool_%d' % gate, 0)
                 _schedule_set_pin('assist_%d' % gate, 0)
             else:
                 active_motor_name = 'respool_%d' % gate if operation == Mmu.ESPOOLER_REWIND else 'assist_%d' % gate
                 inactive_motor_name = 'assist_%d' % gate if operation == Mmu.ESPOOLER_REWIND else 'respool_%d' % gate
-                yammu_direction = (int(gate) if operation == Mmu.ESPOOLER_REWIND else (int(gate) + 1)) % 2
                 _schedule_set_pin(inactive_motor_name, 0)
                 _schedule_set_pin(active_motor_name, value)
                 _schedule_set_pin('enable_%d' % gate, 1)
-                _schedule_set_pin('yammu_motor_pin_%d' % (int(gate) // 4), value)
-                _schedule_set_pin('yammu_direction_pin', yammu_direction)
 
             # Don't change the operation if it is just an in-print assist burst move.
             # If we would change operation, any MMU operation calling the get_operation(gate) method while the motor is performing a burst move
@@ -341,8 +316,7 @@ class MmuESpooler:
                 return
             if self.mmu.log_enabled(Mmu.LOG_STEPPER):
                 self.mmu.log_stepper("ESPOOLER: -----> _set_pin(name=%s, value=%s) @ print_time: %.8f" % (name, value, print_time))
-            if self.is_pwm and not name.startswith('enable_')\
-                and not name.endswith('_direction_pin'):
+            if self.is_pwm and not name.startswith('enable_'):
                 mcu_pin.set_pwm(print_time, value)
             else:
                 mcu_pin.set_digital(print_time, value)

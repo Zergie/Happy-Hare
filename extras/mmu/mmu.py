@@ -177,6 +177,7 @@ class Mmu:
     VARS_MMU_GATE_STATISTICS_PREFIX   = "mmu_statistics_gate_"
     VARS_MMU_SWAP_STATISTICS          = "mmu_statistics_swaps"
     VARS_MMU_COUNTERS                 = "mmu_statistics_counters"
+    VARS_MMU_MOTOR_POWER_MAP_PREFIX   = "mmu_motor_power_"
 
     # Calibration data
     VARS_MMU_ENCODER_RESOLUTION       = "mmu_encoder_resolution"
@@ -5264,9 +5265,11 @@ class Mmu:
                 with self._wrap_sync_mode(MmuToolHead.EXTRUDER_SYNCED_TO_GEAR if motor == "gear+extruder" else MmuToolHead.EXTRUDER_ONLY_ON_GEAR if motor == "extruder" else MmuToolHead.GEAR_ONLY):
                     if homing_move != 0:
                         trig_pos = [0., 0., 0., 0.]
-                        hmove = DummyHomingMove(self.printer, endstops, self.mmu_toolhead) \
-                            if motor == "gear" and isinstance(self.gear_rail, mmu_machine.DummyRail) \
-                            else HomingMove(self.printer, endstops, self.mmu_toolhead)
+                        if motor == "gear" and hasattr(self.gear_rail, 'homing_move') and hasattr(self.gear_rail, 'start_homing'):
+                            self.gear_rail.start_homing(endstops, speed, accel)
+                            hmove = self.gear_rail
+                        else:
+                            hmove = HomingMove(self.printer, endstops, self.mmu_toolhead)
                         init_ext_mcu_pos = self.mmu_extruder_stepper.stepper.get_mcu_position() # For non-homing extruder or if extruder not on gear rail
                         init_pos = pos[1]
                         pos[1] += dist
@@ -8909,26 +8912,3 @@ class MmuCalibrationManager:
         except MmuError as ee:
             # Add some more context to the error and re-raise
             raise MmuError("Calibration for gate %d failed. Aborting, because:\n%s" % (gate, str(ee)))
-
-class DummyHomingMove:
-    HOMING_START_DELAY = 0.001
-    ENDSTOP_SAMPLE_TIME = .000015
-    ENDSTOP_SAMPLE_COUNT = 4
-
-    def __init__(self, printer, endstops, toolhead):
-        self.printer = printer
-        self.endstop = endstops[0][0]  # Assume single endstop
-        self.toolhead = toolhead
-        pass
-
-    def homing_move(self, movepos, speed, probe_pos=False,
-                    triggered=True, check_triggered=True):
-        endstop_value = 1 if triggered else 0
-        self.toolhead.dwell(self.HOMING_START_DELAY)
-
-        # wait for endstop
-        print_time = self.toolhead.get_last_move_time()
-        while self.endstop.query_endstop(print_time) != endstop_value:
-            self.toolhead.dwell(self.ENDSTOP_SAMPLE_TIME)
-            print_time = self.toolhead.get_last_move_time()
-        return [100, 100]
