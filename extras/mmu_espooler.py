@@ -288,6 +288,18 @@ class MmuESpooler:
 
         # None operation is special case of updating without changing operation (typically in-print assist burst)
         if operation == None or self.get_operation(gate) != (operation, value):
+            # Call macro if defined
+            if self.mmu.espooler_control_macro:
+                # Store parameters as list
+                params = ' '.join([
+                    'GATE=' + str(gate),
+                    'OPERATION=' + str(operation),
+                    'POWER=' + str(value)
+                ])
+
+                # Call macro to handle espooler control
+                self.mmu.wrap_gcode_command('%s %s' % (self.mmu.espooler_control_macro, params))
+
             if value == 0: # Stop motor
                 _schedule_set_pin('enable_%d' % gate, 0)
                 _schedule_set_pin('respool_%d' % gate, 0)

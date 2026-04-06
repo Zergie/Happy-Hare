@@ -178,6 +178,7 @@ class Mmu:
     VARS_MMU_SWAP_STATISTICS          = "mmu_statistics_swaps"
     VARS_MMU_COUNTERS                 = "mmu_statistics_counters"
     VARS_MMU_MOTOR_POWER_MAP_PREFIX   = "mmu_motor_power_"
+    VARS_MMU_MOTOR_PID_PREFIX         = "mmu_motor_pid_"
 
     # Calibration data
     VARS_MMU_ENCODER_RESOLUTION       = "mmu_encoder_resolution"
@@ -468,6 +469,7 @@ class Mmu:
         self.tool_speed_multipliers = []
         self.select_tool_macro = config.get('select_tool_macro', default=None)
         self.select_tool_num_switches = config.getint('select_tool_num_switches', default=0, minval=0)
+        self.espooler_control_macro = config.get('espooler_control_macro', default=None)
 
         # Logging
         self.log_level = config.getint('log_level', 1, minval=0, maxval=4)
@@ -856,8 +858,7 @@ class Mmu:
         self.save_variables.allVariables[self.VARS_MMU_CALIB_BOWDEN_HOME] = bowden_home
 
         # Load gear rotation distance configuration (calibration set with MMU_CALIBRATE_GEAR) ---------------
-        self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] \
-            if len(self.gear_rail.steppers) > 0 else 0 # TODO Should probably be per gear in case they are disimilar?
+        self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] # TODO Should probably be per gear in case they are disimilar?
         self.rotation_distances = self.save_variables.allVariables.get(self.VARS_MMU_GEAR_ROTATION_DISTANCES, None)
         if self.rotation_distances:
             self.rotation_distances = [-1 if x == 0 else x for x in self.rotation_distances] # Ensure -1 value for uncalibrated
@@ -5266,7 +5267,7 @@ class Mmu:
                     if homing_move != 0:
                         trig_pos = [0., 0., 0., 0.]
                         if motor == "gear" and hasattr(self.gear_rail, 'homing_move') and hasattr(self.gear_rail, 'start_homing'):
-                            self.gear_rail.start_homing(endstops, speed, accel)
+                            self.gear_rail.start_homing(endstops)
                             hmove = self.gear_rail
                         else:
                             hmove = HomingMove(self.printer, endstops, self.mmu_toolhead)

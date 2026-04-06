@@ -26,7 +26,7 @@ import logging, importlib, math, os, time, re
 # Klipper imports
 import stepper, chelper, toolhead
 from kinematics.extruder import PrinterExtruder, DummyExtruder, ExtruderStepper
-from .homing import Homing, HomingMove
+from .homing import Homing, HomingMove, HOMING_START_DELAY, ENDSTOP_SAMPLE_TIME
 
 from . import mmu_leds
 
@@ -349,7 +349,6 @@ class MmuUnit:
         self.first_gate = first_gate
         self.num_gates = num_gates
         self.leds = None
-        self.motor = None
 
     def manages_gate(self, gate):
         return self.first_gate <= gate < self.first_gate + self.num_gates
@@ -521,7 +520,6 @@ class MmuToolHead(toolhead.ToolHead, object):
 
     def handle_connect(self):
         self.printer_toolhead = self.printer.lookup_object('toolhead')
-
         printer_extruder = self.printer_toolhead.get_extruder()
         if self.mmu_machine.homing_extruder:
             # Restore original extruder options in case user macros reference them
@@ -551,36 +549,10 @@ class MmuToolHead(toolhead.ToolHead, object):
         gear_rail = self.kin.rails[1]
         if hasattr(gear_rail, 'move'):
             gear_rail.move(newpos, speed)
-        elif isinstance(gear_rail, DummyRail):
-            velocity, accel = self.get_gear_limits()
-            distance = abs(newpos[1] - self.get_position()[1])
-
-            # distance needed to accelerate to velocity
-            d_accel = velocity**2 / (2 * accel)
-
-            # minimum distance to reach max speed and decelerate
-            d_min = 2 * d_accel
-
-            if distance >= d_min:
-                # --- trapezoidal profile ---
-                t_accel = velocity / accel
-                d_cruise = distance - d_min
-                t_cruise = d_cruise / velocity
-                move_time = 2 * t_accel + t_cruise
-            else:
-                # peak speed reached
-                v_peak = math.sqrt(distance * accel)
-                t_accel = v_peak / accel
-                move_time = 2 * t_accel
-
-            self.dwell(move_time + EPS)
-            self.set_position(newpos)
         else:
-            super(toolhead.ToolHead, self).move(newpos, speed)
-
+            super(MmuToolHead, self).move(newpos, speed)
 
     # Gear/Extruder synchronization and stepper swapping management...
-
     def select_gear_stepper(self, gate):
         if not self.mmu_machine.multigear: return
         with self._resync_lock:
@@ -1323,11 +1295,8 @@ class DummyRail:
     def __init__(self, config):
         self.steppers = []
         self.endstops = []
-        self.virtual_endstops = []
         self.extra_endstops = []
         self.rail_name = "Dummy"
-        self.printer = config.get_printer()
-        self.query_endstops = self.printer.load_object(config, 'query_endstops')
 
     def get_name(self):
         return self.rail_name
@@ -1340,6 +1309,32 @@ class DummyRail:
 
     def set_position(self, newpos):
         pass
+
+class MotorRail(DummyRail):
+    MOVE_INTERVAL = 0.5 # seconds
+    ENCODER_RESET_TIME = 2.0 # seconds
+
+    def __init__(self, config):
+        super(MotorRail, self).__init__(config)
+        self.config = config
+        self.toolhead = None
+        self.virtual_endstops = []
+        self.rail_name = "MotorRail"
+        self.mmu = None
+        self.mmu_machine = None
+        self.mmu_toolhead = None
+        self.espooler = None
+        self.reactor = None
+        self.motor_encoder = []
+        self.position = [0.0, 0.0, 0.0, 0.0]
+        self.steppers.append(MotorRailStepper())
+
+        self.homing_endstops = None
+
+        self.printer = config.get_printer()
+        self.query_endstops = self.printer.load_object(config, 'query_endstops')
+        self.printer.register_event_handler('klippy:connect', self.handle_connect)
+        self.gcode = self.printer.lookup_object('gcode')
 
     def add_extra_endstop(self, pin, name, register=True, bind_rail_steppers=True, mcu_endstop=None):
         is_virtual = 'virtual_endstop' in pin
@@ -1371,36 +1366,157 @@ class DummyRail:
     def is_endstop_virtual(self, name):
         return name in self.virtual_endstops if name else False
 
-class MotorRail(DummyRail):
-    def __init__(self, config):
-        super(MotorRail, self).__init__(config)
-        self.rail_name = "MotorRail"
-        self.mmu = None
-        self.mmu_machine = None
-        self.motors = []
-
-        self.printer.register_event_handler('klippy:connect', self.handle_connect)
-
     def handle_connect(self):
         self.mmu = self.printer.lookup_object('mmu')
         self.mmu_machine = self.mmu.mmu_machine
-        self.motors = [self.printer.lookup_object('mmu_motor unit%d' % i) for i in range(self.mmu_machine.num_units)]
+        self.mmu_toolhead = self.mmu.mmu_toolhead
+        self.espooler = self.mmu.espooler
+        self.reactor = self.espooler.reactor
+        self.toolhead = self.printer.lookup_object('toolhead')
 
-    def get_motor(self):
-        if len(self.motors) == 1:
-            return self.motors[0]
+        self.motor_encoder = [self.printer.lookup_object('mmu_motor_encoder unit%s' % x, None)
+                              for x in range(self.mmu_machine.num_units)]
+        self.motor_encoder.append(self.printer.lookup_object('mmu_motor_encoder mmu_motor_encoder', None))
+        self.motor_encoder = [x for x in self.motor_encoder if x is not None]
+
+    def get_motor_encoder(self):
+        if len(self.motor_encoder) == 0:
+            return None
+        elif len(self.motor_encoder) == 1:
+            return self.motor_encoder[0]
         else:
-            return self.motors[self.mmu.unit_selected]
+            gate = self.mmu.gate_selected
+            unit = self.mmu_machine.get_mmu_unit_by_gate(gate)
+            return self.motor_encoder[unit.unit_index]
 
-    def start_homing(self, endstops, speed, accel):
-        return self.get_motor().start_homing(endstops, speed, accel)
+    def get_movetime_estimate(self, distance, speed):
+        velocity, accel = self.mmu_toolhead.get_gear_limits()
+        velocity = min(velocity, speed)
+
+        # distance needed to accelerate to velocity
+        d_accel = velocity**2 / (2 * accel)
+
+        # minimum distance to reach max speed and decelerate
+        d_min = 2 * d_accel
+
+        if distance >= d_min:
+            # --- trapezoidal profile ---
+            t_accel = velocity / accel
+            d_cruise = distance - d_min
+            t_cruise = d_cruise / velocity
+            move_time = 2 * t_accel + t_cruise
+        else:
+            # --- peak speed reached ---
+            v_peak = math.sqrt(distance * accel)
+            t_accel = v_peak / accel
+            move_time = 2 * t_accel
+
+        return move_time
+
+    # Dummy move function: waits for motor encoder to reach target position
+    def move(self, position, speed):
+        end_position = position[1]
+        start_position = self.mmu_toolhead.get_position()[1]
+        distance = abs(end_position - start_position)
+
+        motor_encoder = self.get_motor_encoder()
+
+        move_successful = True
+        if motor_encoder:
+            timeout = self.reactor.monotonic() + 2 * self.get_movetime_estimate(distance, speed)
+
+            while motor_encoder.get_position() < distance:
+                self.mmu_toolhead.dwell(self.MOVE_INTERVAL)
+
+                # self.gcode.respond_info("Move --> Distance: %.3f mm, Remaining %.3f mm, Velocity: %.1f mm/s" % (
+                #     motor_encoder.get_position(),
+                #     distance - motor_encoder.get_position(),
+                #     motor_encoder.get_velocity()))
+
+                if self.reactor.monotonic() > timeout:
+                    move_successful = False
+                    break
+
+            self._schedule_encoder_reset()
+        else:
+            self.mmu_toolhead.dwell(self.get_movetime_estimate(distance, speed))
+
+        if not move_successful:
+            raise self.printer.command_error("Motor rail estimated move time exceeded. Moved %.1f mm out of %.1f mm." % (
+                motor_encoder.get_position(),
+                distance))
+
+    def _schedule_encoder_reset(self):
+        motor_encoder = self.get_motor_encoder()
+        if motor_encoder:
+            waketime = self.reactor.monotonic() + self.ENCODER_RESET_TIME
+            self.reactor.register_callback(lambda pt: motor_encoder.reset_position(), waketime)
+
+    def start_homing(self, endstops):
+        self.homing_endstops = endstops
+
+    def check_homing_endstops(self, print_time, endstop_value):
+        for endstop in self.homing_endstops:
+            if endstop[0].query_endstop(print_time) == endstop_value:
+                return True
+        return False
 
     def homing_move(self, movepos, speed, probe_pos=False,
                     triggered=True, check_triggered=True):
-        return self.get_motor().homing_move(movepos, speed, probe_pos, triggered, check_triggered)
+        endstop_value = 1 if triggered else 0
+        endstop = self.homing_endstops[0] # Assume only one endstop for motor rail
+        self.toolhead.dwell(HOMING_START_DELAY)
 
-    def move(self, position, speed):
-        return self.get_motor().move(position, speed)
+        distance = abs(movepos[1] - self.mmu_toolhead.get_position()[1])
+
+        motor_encoder = self.get_motor_encoder()
+
+        # wait for endstop
+        move_error = ""
+        print_time = self.toolhead.get_last_move_time()
+
+        timeout = print_time + self.get_movetime_estimate(distance, speed) \
+            * (2 if motor_encoder else 1)
+
+        # while endstop[0].query_endstop(print_time) != endstop_value:
+        while not self.check_homing_endstops(print_time, endstop_value):
+            self.toolhead.dwell(ENDSTOP_SAMPLE_TIME)
+            print_time = self.toolhead.get_last_move_time()
+
+            if check_triggered:
+                if print_time > timeout:
+                    move_error = "No trigger on %s after full movement (timeout)" % (endstop[1],)
+                    break
+                elif motor_encoder and motor_encoder.get_position() >= distance:
+                    move_error = "No trigger on %s after full movement" % (endstop[1],)
+                    break
+
+        self._schedule_encoder_reset()
+        if move_error:
+            raise self.printer.command_error(move_error)
+
+        return movepos
+
+class MotorRailStepper:
+    def __init__(self):
+        self._rotation_dist = 1.0  # mm per rotation
+        self._steps_per_rotation = 200  # steps per rotation
+
+    def get_rotation_distance(self):
+        return self._rotation_dist, self._steps_per_rotation
+
+    def set_rotation_distance(self, rotation_dist):
+        self._rotation_dist = rotation_dist
+
+    def set_stepper_kinematics(self, sk):
+        pass
+
+    def set_trapq(self, tq):
+        return None
+
+    def set_position(self, coord):
+        self.position = coord
+
 
 def load_config(config):
     return MmuMachine(config)
