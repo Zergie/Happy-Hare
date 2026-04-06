@@ -473,6 +473,7 @@ class Mmu:
         self.tool_speed_multipliers = []
         self.select_tool_macro = config.get('select_tool_macro', default=None)
         self.select_tool_num_switches = config.getint('select_tool_num_switches', default=0, minval=0)
+        self.espooler_control_macro = config.get('espooler_control_macro', default=None)
 
         # Logging
         self.log_level = config.getint('log_level', 1, minval=0, maxval=4)
