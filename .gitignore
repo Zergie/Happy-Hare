@@ -1,2 +1,6 @@
 my_*.cfg
 .DS_Store
+
+# Byte-compiled / optimized / python files
+__pycache__
+*.pyc

@@ -36,6 +36,7 @@ from .mmu_led_manager           import MmuLedManager
 from .mmu_sync_feedback_manager import MmuSyncFeedbackManager
 from .mmu_calibration_manager   import MmuCalibrationManager
 from .mmu_environment_manager   import MmuEnvironmentManager
+from .mmu_gear_bldc            import MmuGearBldc
 
 
 # Main klipper module
@@ -258,6 +259,8 @@ class Mmu:
         self.managers = []                    # List of mmu manager classes to encapsulate functionality. Managers add themselves
         self.mmu_machine = self.printer.lookup_object("mmu_machine")
         self.num_gates = self.mmu_machine.num_gates
+        self.use_bldc_gear = self.mmu_machine.use_bldc_gear
+        self.bldc_by_unit = {}
         self.calibration_status = 0b0
         self.w3c_colors = dict(self.W3C_COLORS)
         self.filament_remaining = 0.
@@ -728,6 +731,9 @@ class Mmu:
         # Load espooler if it exists
         self.espooler = self.printer.lookup_object('mmu_espooler mmu_espooler', None)
 
+        if self.use_bldc_gear:
+            self._setup_bldc_gear(config)
+
     def _setup_logging(self):
         # Setup background file based logging before logging any messages
         if self.mmu_logger is None and self.log_file_level >= 0:
@@ -756,7 +762,7 @@ class Mmu:
         # on gear_stepper and tip forming on extruder
         self.gear_tmc = self.extruder_tmc = None
         for chip in mmu_machine.TMC_CHIPS:
-            if self.gear_tmc is None:
+            if not self.use_bldc_gear and self.gear_tmc is None:
                 self.gear_tmc = self.printer.lookup_object('%s %s' % (chip, mmu_machine.GEAR_STEPPER_CONFIG), None)
                 if self.gear_tmc is not None:
                     self.log_debug("Found %s on gear_stepper. Current control enabled. Stallguard 'touch' homing possible." % chip)
@@ -764,7 +770,9 @@ class Mmu:
                 self.extruder_tmc = self.printer.lookup_object("%s %s" % (chip, self.extruder_name), None)
                 if self.extruder_tmc is not None:
                     self.log_debug("Found %s on extruder. Current control enabled. %s" % (chip, "Stallguard 'touch' homing possible." if self.homing_extruder else ""))
-        if self.gear_tmc is None:
+        if self.use_bldc_gear:
+            self.log_debug("BLDC gear configured; skipping gear TMC current control")
+        elif self.gear_tmc is None:
             self.log_debug("TMC driver not found for gear_stepper, cannot use current reduction for collision detection or while synchronized printing")
         if self.extruder_tmc is None:
             self.log_debug("TMC driver not found for extruder, cannot use current increase for tip forming move")
@@ -857,7 +865,11 @@ class Mmu:
         self.save_variables.allVariables[self.VARS_MMU_CALIB_BOWDEN_HOME] = bowden_home
 
         # Load gear rotation distance configuration (calibration set with MMU_CALIBRATE_GEAR) ---------------
-        self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] # TODO Should probably be per gear in case they are disimilar?
+        if self.use_bldc_gear:
+            bldc = self._get_bldc_for_gate(0)
+            self.default_rotation_distance = bldc.get_mm_per_rev() if bldc else 1.0
+        else:
+            self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] # TODO Should probably be per gear in case they are disimilar?
         self.rotation_distances = self.save_variables.allVariables.get(self.VARS_MMU_GEAR_ROTATION_DISTANCES, None)
         if self.rotation_distances:
             self.rotation_distances = [-1 if x == 0 else x for x in self.rotation_distances] # Ensure -1 value for uncalibrated
@@ -2348,6 +2360,10 @@ class Mmu:
         else:
             if motor in ["all", "gear", "gears"]:
                 self.mmu_toolhead.unsync()
+                if self.has_bldc_gear():
+                    bldc = self._get_bldc_for_gate()
+                    if bldc is not None:
+                        bldc.stop()
                 for stepper in steppers:
                     se = stepper_enable.lookup_enable(stepper.get_name())
                     se.motor_disable(self.mmu_toolhead.get_last_move_time())
@@ -3433,6 +3449,46 @@ class Mmu:
 
     def has_espooler(self):
         return self.espooler is not None
+
+    def has_bldc_gear(self):
+        return self.use_bldc_gear and bool(self.bldc_by_unit)
+
+    def _setup_bldc_gear(self, config):
+        self.bldc_by_unit = {}
+        shared_bldc = None
+
+        for unit in self.mmu_machine.units:
+            section_names = [
+                'mmu_gear_bldc unit%d' % (unit.unit_index + 1),
+                'mmu_gear_bldc %s' % unit.name,
+                'mmu_gear_bldc',
+            ]
+
+            section_name = None
+            for candidate in section_names:
+                if config.has_section(candidate):
+                    section_name = candidate
+                    break
+
+            if section_name is None:
+                raise self.config.error("Missing BLDC section for unit %d. Define [%s], [%s], or [%s]." % (unit.unit_index + 1, section_names[0], section_names[1], section_names[2]))
+
+            if section_name == 'mmu_gear_bldc':
+                if shared_bldc is None:
+                    bldc_cfg = config.getsection(section_name)
+                    shared_bldc = MmuGearBldc(bldc_cfg, self, 0, self.num_gates)
+                self.bldc_by_unit[unit.unit_index] = shared_bldc
+            else:
+                bldc_cfg = config.getsection(section_name)
+                self.bldc_by_unit[unit.unit_index] = MmuGearBldc(bldc_cfg, self, unit.first_gate, unit.num_gates)
+
+    def _get_bldc_for_gate(self, gate=None):
+        if not self.has_bldc_gear():
+            return None
+        if gate is None:
+            gate = self.gate_selected
+        unit_index = self.find_unit_by_gate(gate if gate is not None else 0)
+        return self.bldc_by_unit.get(unit_index)
 
     def _check_has_espooler(self):
         if not self.has_espooler():
@@ -5572,6 +5628,10 @@ class Mmu:
                     self.log_error("Endstop '%s' not found" % endstop_name)
                     return null_rtn
 
+            if self.has_bldc_gear() and motor in ["gear", "gear+extruder", "synced"]:
+                self.log_error("BLDC homing requires dedicated sensor-based handling and is not available in this path")
+                return null_rtn
+
         # Set sensible speeds and accelaration if not supplied
         if motor in ["gear"]:
             if homing_move != 0:
@@ -5627,6 +5687,8 @@ class Mmu:
 
         with self._wrap_espooler(motor, dist, speed, accel, homing_move):
             wait = wait or self._wait_for_espooler # Allow eSpooler wrapper to force wait
+            bldc = self._get_bldc_for_gate() if self.has_bldc_gear() else None
+            bldc_active_move = bldc is not None and motor in ["gear", "gear+extruder", "synced"] and homing_move == 0
 
             # Gear rail is driving the filament
             start_pos = self.mmu_toolhead.get_position()[1]
@@ -5693,9 +5755,16 @@ class Mmu:
                 else:
                     if self.log_enabled(self.LOG_STEPPER):
                         self.log_stepper("%s MOVE: dist=%.1f, speed=%.1f, accel=%.1f, wait=%s" % (motor.upper(), dist, speed, accel, wait))
-                    pos[1] += dist
-                    with self.wrap_accel(accel):
-                        self.mmu_toolhead.move(pos, speed)
+                    if bldc_active_move:
+                        bldc.start_move(dist, speed)
+                    if self.use_bldc_gear and motor == "gear":
+                        self.reactor.pause(self.reactor.monotonic() + abs(dist) / max(speed, 1e-6))
+                        pos[1] += dist
+                        self.mmu_toolhead.set_position(pos)
+                    else:
+                        pos[1] += dist
+                        with self.wrap_accel(accel):
+                            self.mmu_toolhead.move(pos, speed)
 
             # Extruder is driving, gear rail is following
             elif motor in ["synced"]:
@@ -5705,6 +5774,8 @@ class Mmu:
                 else:
                     if self.log_enabled(self.LOG_STEPPER):
                         self.log_stepper("%s MOVE: dist=%.1f, speed=%.1f, accel=%.1f, wait=%s" % (motor.upper(), dist, speed, accel, wait))
+                    if bldc_active_move:
+                        bldc.start_move_hold(dist, speed)
                     ext_pos[3] += dist
                     self.toolhead.move(ext_pos, speed)
 
@@ -5712,6 +5783,8 @@ class Mmu:
             self.toolhead.flush_step_generation()     # TTC mitigation (TODO still required?)
             if wait:
                 self.movequeues_wait()
+            if bldc_active_move:
+                bldc.stop()
 
         encoder_end = self.get_encoder_distance(dwell=encoder_dwell)
         measured = encoder_end - encoder_start
@@ -6484,7 +6557,11 @@ class Mmu:
     def set_gear_rotation_distance(self, rd):
         if rd:
             self.log_trace("Setting gear motor rotation distance: %.4f" % rd)
-            if self.gear_rail.steppers:
+            if self.has_bldc_gear():
+                bldc = self._get_bldc_for_gate()
+                if bldc is not None:
+                    bldc.set_mm_per_rev(rd)
+            elif self.gear_rail.steppers:
                 self.gear_rail.steppers[0].set_rotation_distance(rd)
 
     def _moonraker_push_lane_data(self, gate_ids = None):

@@ -41,6 +41,7 @@ TMC_CHIPS = ["tmc2209", "tmc2130", "tmc2208", "tmc2660", "tmc5160", "tmc2240"]
 # Stepper config sections
 SELECTOR_STEPPER_CONFIG = "stepper_mmu_selector" # Optional
 GEAR_STEPPER_CONFIG     = "stepper_mmu_gear"
+BLDC_GEAR_CONFIG        = "mmu_gear_bldc"
 
 SHAREABLE_STEPPER_PARAMS = ['rotation_distance', 'gear_ratio', 'microsteps', 'full_steps_per_rotation']
 OTHER_STEPPER_PARAMS     = ['step_pin', 'dir_pin', 'enable_pin', 'endstop_pin', 'rotation_distance', 'pressure_advance', 'pressure_advance_smooth_time']
@@ -303,43 +304,55 @@ class MmuMachine:
 
         # Expand config to allow lazy (incomplete) repetitious gear configuration for type-B MMU's
         self.multigear = False
+        self.use_bldc_gear = False
+
+        has_stepper_gear = config.has_section(GEAR_STEPPER_CONFIG)
+        bldc_sections = [s for s in config.fileconfig.sections() if s == BLDC_GEAR_CONFIG or s.startswith(BLDC_GEAR_CONFIG + " ")]
+        self.use_bldc_gear = bool(bldc_sections)
+
+        if has_stepper_gear and self.use_bldc_gear:
+            raise config.error("Both [%s] and [%s] are configured. Use exactly one gear drive definition." % (GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG))
+        if not has_stepper_gear and not self.use_bldc_gear:
+            raise config.error("No MMU gear drive configured. Define either [%s] or [%s]." % (GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG))
 
         # Find the TMC controller for base stepper so we can fill in missing config for other matching steppers
         base_tmc_chip = base_tmc_section = None
-        for chip in TMC_CHIPS:
-            base_tmc_section = '%s %s' % (chip, GEAR_STEPPER_CONFIG)
-            if config.has_section(base_tmc_section):
-                base_tmc_chip = chip
-                break
+        if has_stepper_gear:
+            for chip in TMC_CHIPS:
+                base_tmc_section = '%s %s' % (chip, GEAR_STEPPER_CONFIG)
+                if config.has_section(base_tmc_section):
+                    base_tmc_chip = chip
+                    break
 
         last_gear = 24
-        for i in range(1, last_gear): # Don't allow "_0" or it is confusing with unprefixed initial stepper
-            section = "%s_%d" % (GEAR_STEPPER_CONFIG, i)
-            if not config.has_section(section):
-                last_gear = i
-                break
+        if has_stepper_gear:
+            for i in range(1, last_gear): # Don't allow "_0" or it is confusing with unprefixed initial stepper
+                section = "%s_%d" % (GEAR_STEPPER_CONFIG, i)
+                if not config.has_section(section):
+                    last_gear = i
+                    break
 
-            self.multigear = True
+                self.multigear = True
 
-            # Share stepper config section with additional steppers
-            stepper_section = "%s_%d" % (GEAR_STEPPER_CONFIG, i)
-            for key in SHAREABLE_STEPPER_PARAMS:
-                if not config.fileconfig.has_option(stepper_section, key) and config.fileconfig.has_option(GEAR_STEPPER_CONFIG, key):
-                    base_value = config.fileconfig.get(GEAR_STEPPER_CONFIG, key)
-                    if base_value:
-                        logging.info("MMU: Sharing gear stepper config %s=%s with %s" % (key, base_value, stepper_section))
-                        config.fileconfig.set(stepper_section, key, base_value)
+                # Share stepper config section with additional steppers
+                stepper_section = "%s_%d" % (GEAR_STEPPER_CONFIG, i)
+                for key in SHAREABLE_STEPPER_PARAMS:
+                    if not config.fileconfig.has_option(stepper_section, key) and config.fileconfig.has_option(GEAR_STEPPER_CONFIG, key):
+                        base_value = config.fileconfig.get(GEAR_STEPPER_CONFIG, key)
+                        if base_value:
+                            logging.info("MMU: Sharing gear stepper config %s=%s with %s" % (key, base_value, stepper_section))
+                            config.fileconfig.set(stepper_section, key, base_value)
 
-            # IF TMC controller for this additional stepper matches the base we can fill in missing TMC config
-            if base_tmc_chip:
-                tmc_section = '%s %s_%d' % (base_tmc_chip, GEAR_STEPPER_CONFIG, i)
-                if config.has_section(tmc_section):
-                    for key in SHAREABLE_TMC_PARAMS:
-                        if config.fileconfig.has_option(base_tmc_section, key) and not config.fileconfig.has_option(tmc_section, key):
-                            base_value = config.fileconfig.get(base_tmc_section, key)
-                            if base_value:
-                                logging.info("MMU: Sharing gear tmc config %s=%s with %s" % (key, base_value, tmc_section))
-                                config.fileconfig.set(tmc_section, key, base_value)
+                # IF TMC controller for this additional stepper matches the base we can fill in missing TMC config
+                if base_tmc_chip:
+                    tmc_section = '%s %s_%d' % (base_tmc_chip, GEAR_STEPPER_CONFIG, i)
+                    if config.has_section(tmc_section):
+                        for key in SHAREABLE_TMC_PARAMS:
+                            if config.fileconfig.has_option(base_tmc_section, key) and not config.fileconfig.has_option(tmc_section, key):
+                                base_value = config.fileconfig.get(base_tmc_section, key)
+                                if base_value:
+                                    logging.info("MMU: Sharing gear tmc config %s=%s with %s" % (key, base_value, tmc_section))
+                                    config.fileconfig.set(tmc_section, key, base_value)
 
         # H/W validation checks
         if self.multigear and last_gear != self.num_gates:
@@ -383,7 +396,7 @@ class MmuMachine:
         if index >= 0 and index < self.num_units:
             return self.units[index]
         return None
-        
+
     def get_mmu_unit_by_gate(self, gate): # Hack to allow some v4 functionality into the v3 line
         if gate >= 0 and gate < self.num_gates:
             return self.unit_by_gate[gate]
@@ -399,7 +412,7 @@ class MmuUnit:
         self.unit_index = unit_index
         self.first_gate = first_gate
         self.num_gates = num_gates
-        self.leds = None 
+        self.leds = None
 
     def manages_gate(self, gate):
         return self.first_gate <= gate < self.first_gate + self.num_gates
@@ -1037,8 +1050,11 @@ class MmuKinematics:
             self.rails[0].setup_itersolve('cartesian_stepper_alloc', b'x')
         else:
             self.rails.append(DummyRail())
-        self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
-        self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
+        if self.mmu_machine.use_bldc_gear:
+            self.rails.append(DummyRail())
+        else:
+            self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
+            self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
 
         for s in self.get_steppers():
             s.set_trapq(toolhead.get_trapq())
@@ -1348,6 +1364,21 @@ class DummyRail:
 
     def get_endstops(self):
         return self.endstops
+
+    def get_extra_endstop_names(self):
+        return []
+
+    def get_extra_endstop(self, _name):
+        return None
+
+    def is_endstop_virtual(self, _name):
+        return False
+
+    def setup_itersolve(self, *_args):
+        pass
+
+    def get_range(self):
+        return (0., 0.)
 
     def set_position(self, newpos):
         pass
