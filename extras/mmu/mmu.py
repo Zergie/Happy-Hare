@@ -867,7 +867,7 @@ class Mmu:
         # Load gear rotation distance configuration (calibration set with MMU_CALIBRATE_GEAR) ---------------
         if self.use_bldc_gear:
             bldc = self._get_bldc_for_gate(0)
-            self.default_rotation_distance = bldc.get_mm_per_rev() if bldc else 1.0
+            self.default_rotation_distance = bldc.get_rotation_distance() if bldc else 1.0
         else:
             self.default_rotation_distance = self.gear_rail.steppers[0].get_rotation_distance()[0] # TODO Should probably be per gear in case they are disimilar?
         self.rotation_distances = self.save_variables.allVariables.get(self.VARS_MMU_GEAR_ROTATION_DISTANCES, None)
@@ -2529,7 +2529,7 @@ class Mmu:
 
 ### CALIBRATION GCODE COMMANDS ###################################################
 
-    cmd_MMU_CALIBRATE_GEAR_help = "Calibration routine for gear stepper rotational distance"
+    cmd_MMU_CALIBRATE_GEAR_help = "Calibration routine for gear drive rotational distance"
     def cmd_MMU_CALIBRATE_GEAR(self, gcmd):
         self.log_to_file(gcmd.get_commandline())
         if self.check_if_disabled(): return
@@ -2548,12 +2548,19 @@ class Mmu:
                 return
 
             if measured > 0:
-                current_rd = self.gear_rail.steppers[0].get_rotation_distance()[0]
+                if self.has_bldc_gear():
+                    bldc = self._get_bldc_for_gate(gate)
+                    current_rd = bldc.get_rotation_distance() if bldc is not None else self.default_rotation_distance
+                    gear_type = "BLDC"
+                else:
+                    current_rd = self.gear_rail.steppers[0].get_rotation_distance()[0]
+                    gear_type = "stepper"
                 new_rd = round(current_rd * measured / length, 4)
-                self.log_always("MMU gear stepper 'rotation_distance' calculated to be %.4f (currently: %.4f)" % (new_rd, current_rd))
+                self.log_always("MMU %s gear gate %d 'rotation_distance' calculated to be %.4f (currently: %.4f)" % (gear_type, gate, new_rd, current_rd))
                 if save:
                     self.set_gear_rotation_distance(new_rd)
                     self.calibration_manager.update_gear_rd(new_rd, console_msg=True)
+                    self.log_always("Saved %s gear gate %d rotation_distance: %.4f" % (gear_type, gate, new_rd))
                 return
 
             raise gcmd.error("Must specify 'MEASURED=' and optionally 'LENGTH='")
@@ -6560,7 +6567,7 @@ class Mmu:
             if self.has_bldc_gear():
                 bldc = self._get_bldc_for_gate()
                 if bldc is not None:
-                    bldc.set_mm_per_rev(rd)
+                    bldc.set_rotation_distance(rd)
             elif self.gear_rail.steppers:
                 self.gear_rail.steppers[0].set_rotation_distance(rd)
 

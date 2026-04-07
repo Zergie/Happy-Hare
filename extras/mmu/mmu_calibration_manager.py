@@ -145,7 +145,7 @@ class MmuCalibrationManager:
 
         if rd <= 0:
             rd = self.mmu.default_rotation_distance
-            self.mmu.log_debug("Gate %d not calibrated, falling back to default rotation_distance: %.4f" % (gate, rd))
+            self.mmu.log_warning("Warning: Gate %d not calibrated, falling back to default rotation_distance: %.4f" % (gate, rd))
 
         return rd
 
@@ -203,6 +203,11 @@ class MmuCalibrationManager:
 
         # Persist
         self.mmu.save_variable(self.mmu.VARS_MMU_GEAR_ROTATION_DISTANCES, self.mmu.rotation_distances, write=True)
+
+        # Keep runtime gear drive in sync with persisted value for active gate.
+        active_gate = self.mmu.gate_selected
+        if active_gate >= 0 and (all_gates or gate == active_gate):
+            self.mmu.set_gear_rotation_distance(self.get_gear_rd(active_gate))
 
 
     #
@@ -436,7 +441,11 @@ class MmuCalibrationManager:
             mean_neg = self.mmu._sample_stats(neg_values)['mean']
             mean = (float(mean_pos) + float(mean_neg)) / 2
             ratio = mean / length
-            current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]
+            if self.mmu.has_bldc_gear():
+                bldc = self.mmu._get_bldc_for_gate(gate)
+                current_rd = bldc.get_rotation_distance() if bldc is not None else self.mmu.default_rotation_distance
+            else:
+                current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]
             new_rd = round(ratio * current_rd, 4)
 
             self.mmu.log_always("Calibration move of %d x %.1fmm, average encoder measurement: %.1fmm - Ratio is %.4f" % (repeats * 2, length, mean, ratio))

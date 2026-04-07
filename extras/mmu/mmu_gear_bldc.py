@@ -45,7 +45,7 @@ class MmuGearBldc:
             raise config.error("'pwm_min' cannot be greater than 'pwm_max' in [%s]" % config.get_name())
 
         self.max_rpm = config.getfloat('max_rpm', 6000., above=0.)
-        self.mm_per_rev = config.getfloat('mm_per_rev', 1.0, above=0.)
+        self.rotation_distance = config.getfloat('rotation_distance', 1.0, above=0.)
 
         self.hardware_pwm = config.getboolean('hardware_pwm', False)
         self.cycle_time = config.getfloat('cycle_time', 0.00005, above=0.)
@@ -153,7 +153,7 @@ class MmuGearBldc:
             return 0.
 
         forward = dist > 0.
-        rpm = 60. * speed / self.mm_per_rev
+        rpm = 60. * speed / self.rotation_distance
         self._set_target(rpm, forward)
         self.reactor.pause(self.reactor.monotonic() + abs(dist) / speed)
         self.stop()
@@ -168,7 +168,7 @@ class MmuGearBldc:
             self.stop()
             return
         forward = dist > 0.
-        rpm = 60. * speed / self.mm_per_rev
+        rpm = 60. * speed / self.rotation_distance
         self._set_target(rpm, forward)
 
     def start_move_hold(self, dist, speed, hold_seconds=None):
@@ -180,12 +180,12 @@ class MmuGearBldc:
             hold_seconds = max(0., hold_seconds)
             self.manual_hold_until = self.reactor.monotonic() + hold_seconds
 
-    def set_mm_per_rev(self, value):
+    def set_rotation_distance(self, value):
         if value > 0.:
-            self.mm_per_rev = value
+            self.rotation_distance = value
 
-    def get_mm_per_rev(self):
-        return self.mm_per_rev
+    def get_rotation_distance(self):
+        return self.rotation_distance
 
     def get_rpm(self):
         if self.tachometer is None:
@@ -198,7 +198,7 @@ class MmuGearBldc:
             'pwm': self.last_pwm,
             'dir': self.last_dir,
             'rpm': self.get_rpm(),
-            'mm_per_rev': self.mm_per_rev,
+            'rotation_distance': self.rotation_distance,
             'gate_start': self.first_gate,
             'gate_end': self.first_gate + self.num_gates - 1,
         }
@@ -253,7 +253,7 @@ class MmuGearBldc:
             self.stop()
             return eventtime + self.SYNC_POLL_INTERVAL
 
-        rpm = 60. * abs(speed) / self.mm_per_rev
+        rpm = 60. * abs(speed) / self.rotation_distance
         self._set_target(rpm, speed >= 0.)
 
         if self.tachometer is not None:
