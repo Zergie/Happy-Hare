@@ -3588,9 +3588,12 @@ class Mmu:
         """
         Return the approximate live filament position
         """
-        gear_stepper = self.gear_rail.steppers[0]
-        mcu_pos = gear_stepper.get_mcu_position()
-        return mcu_pos * gear_stepper.get_step_dist()
+        if self.gear_rail.steppers:
+            gear_stepper = self.gear_rail.steppers[0]
+            mcu_pos = gear_stepper.get_mcu_position()
+            return mcu_pos * gear_stepper.get_step_dist()
+        # BLDC has no gear rail stepper; use mmu toolhead tracked filament position
+        return self._get_filament_position()
 
     def _set_filament_position(self, position = 0.):
         pos = self.mmu_toolhead.get_position()
@@ -4853,10 +4856,11 @@ class Mmu:
 
     # Special extruder homing option for detecting the collision base on lack of encoder movement
     def _home_to_extruder_collision_detection(self, max_length):
-        # Lock the extruder stepper
-        stepper_enable = self.printer.lookup_object('stepper_enable')
-        ge = stepper_enable.lookup_enable(self.mmu_extruder_stepper.stepper.get_name())
-        ge.motor_enable(self.toolhead.get_last_move_time())
+        # Lock the extruder stepper when using stepper gear drive; BLDC path doesn't require this
+        if not self.has_bldc_gear():
+            stepper_enable = self.printer.lookup_object('stepper_enable')
+            ge = stepper_enable.lookup_enable(self.mmu_extruder_stepper.stepper.get_name())
+            ge.motor_enable(self.toolhead.get_last_move_time())
 
         step = self.extruder_collision_homing_step * math.ceil(self.encoder_resolution * 10) / 10
         self.log_debug("Homing to extruder gear, up to %.1fmm in %.1fmm steps" % (max_length, step))
@@ -5635,9 +5639,9 @@ class Mmu:
                     self.log_error("Endstop '%s' not found" % endstop_name)
                     return null_rtn
 
-            if self.has_bldc_gear() and motor in ["gear", "gear+extruder", "synced"]:
-                self.log_error("BLDC homing requires dedicated sensor-based handling and is not available in this path")
-                return null_rtn
+            if self.has_bldc_gear() and motor in ["gear", "gear+extruder"]:
+                # BLDC homing uses sensor-based polling instead of Klipper HomingMove
+                return self._trace_bldc_homing_move(trace_str, dist, speed, accel, motor, homing_move, endstop_name)
 
         # Set sensible speeds and accelaration if not supplied
         if motor in ["gear"]:
@@ -5822,6 +5826,114 @@ class Mmu:
                 else:
                     # Average down over 10 swaps
                     self.gate_statistics[self.gate_selected]['quality'] = (cur_quality * 9 + quality) / 10
+
+        return actual, homed, measured, delta
+
+    # BLDC-specific homing using sensor-based polling instead of stepper HomingMove
+    def _trace_bldc_homing_move(self, trace_str, dist, speed, accel, motor, homing_move, endstop_name):
+        encoder_start = self.get_encoder_distance(dwell=False)
+        pos = self.mmu_toolhead.get_position()
+        init_pos = pos[1]
+        homed = False
+        actual = 0.
+        halt_pos = None
+        null_rtn = (0., False, 0., 0.)
+
+        if endstop_name is None:
+            self.log_error("BLDC homing requires explicit endstop_name")
+            return null_rtn
+
+        sensor_name = self.sensor_manager.get_mapped_endstop_name(endstop_name)
+        endstops = self.gear_rail.get_extra_endstop(sensor_name)
+        mcu_endstops = [es for es, _ in endstops] if endstops is not None else []
+        sensor_state = self.sensor_manager.check_sensor(sensor_name)
+        if sensor_state is None and not mcu_endstops:
+            self.log_error("Endstop '%s' is not available for BLDC homing (no MMU sensor or rail endstop)" % sensor_name)
+            return null_rtn
+
+        def _read_endstop_state():
+            state = self.sensor_manager.check_sensor(sensor_name)
+            if state is not None:
+                return bool(state), "sensor"
+            if mcu_endstops:
+                print_time = self.mmu_toolhead.get_last_move_time()
+                for mcu_endstop in mcu_endstops:
+                    if mcu_endstop.query_endstop(print_time):
+                        return True, "endstop"
+                return False, "endstop"
+            return None, "none"
+
+        if speed is None:
+            speed = self.gear_homing_speed if motor == "gear" else min(self.gear_homing_speed, self.extruder_homing_speed)
+
+        if self.gate_selected >= 0:
+            adjust = self.gate_speed_override[self.gate_selected] / 100.
+            speed *= adjust
+        speed = max(speed, 1e-6)
+
+        timeout = abs(dist) / speed + 0.5
+        move_sign = 1. if dist >= 0. else -1.
+        target_sensor_state = (homing_move > 0)
+        bldc = self._get_bldc_for_gate()
+        if bldc is None:
+            self.log_error("BLDC motor not available for gate %d" % self.gate_selected)
+            return null_rtn
+
+        try:
+            if motor == "gear+extruder":
+                self.mmu_toolhead.sync(MmuToolHead.EXTRUDER_SYNCED_TO_GEAR)
+                self._adjust_gear_current(percent=self.sync_gear_current, reason="for extruder synced homing")
+                # For gear+extruder homing, command both BLDC and extruder to move concurrently
+                pos[1] += dist
+                self.mmu_toolhead.move(pos, speed)
+                bldc.start_move(dist, speed)
+            else:
+                bldc.start_move(dist, speed)
+            start_time = self.reactor.monotonic()
+            poll_interval = 0.01
+            poll_source = "none"
+            while (self.reactor.monotonic() - start_time) < timeout:
+                sensor_state, poll_source = _read_endstop_state()
+                if sensor_state is not None and sensor_state == target_sensor_state:
+                    homed = True
+                    break
+                self.reactor.pause(self.reactor.monotonic() + poll_interval)
+
+            time_elapsed = min(self.reactor.monotonic() - start_time, timeout)
+            moved = min(abs(dist), speed * time_elapsed)
+            actual = move_sign * moved
+            if motor != "gear+extruder":
+                # For gear-only moves, manually update position since BLDC bypasses stepper
+                pos[1] = init_pos + actual
+                self.mmu_toolhead.set_position(pos)
+            halt_pos = self.mmu_toolhead.get_position()
+        finally:
+            bldc.stop()
+            if motor == "gear+extruder":
+                self.mmu_toolhead.sync(MmuToolHead.GEAR_ONLY)
+                self._restore_gear_current()
+
+        encoder_end = self.get_encoder_distance(dwell=False)
+        measured = encoder_end - encoder_start
+        delta = abs(actual) - measured
+
+        if trace_str and halt_pos is not None:
+            trace_str += ". BLDC: '%s' %s after moving %.1fmm (of max %.1fmm), encoder measured %.1fmm (delta %.1fmm)"
+            trace_str = trace_str % (motor, ("homed" if homed else "did not home"), actual, dist, measured, delta)
+            trace_str += ". Pos: @%.1f, (%.1fmm)" % (halt_pos[1], encoder_end)
+            self.log_trace(trace_str)
+
+        if self.log_enabled(self.LOG_STEPPER) and halt_pos is not None:
+            self.log_stepper("%s BLDC HOMING MOVE: max dist=%.1f, speed=%.1f, endstop_name=%s, sensor=%s, source=%s, target_state=%s >> %s" % (
+                motor.upper(), dist, speed, endstop_name, sensor_name, poll_source, target_sensor_state,
+                ("concurrent=%s, %s halt_pos=%.1f (moved=%.1f), start_pos=%.1f, encoder measured=%.1fmm (delta %.1fmm)"
+                    % (
+                        "yes" if motor == "gear+extruder" else "no",
+                        "HOMED" if homed else "DID NOT HOME",
+                        halt_pos[1], actual, init_pos, measured, delta,
+                    )
+                ),
+            ))
 
         return actual, homed, measured, delta
 
@@ -9164,3 +9276,4 @@ class Mmu:
 
 def load_config(config):
     return Mmu(config)
+

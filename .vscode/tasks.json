@@ -1,0 +1,94 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Export Code to Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                ". C:/GIT/YAMMU/Firmware/Sync-TestRig.ps1 -Export;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Export Startup.gcode to Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "scp C:/GIT/YAMMU/Firmware/Happy-Hare/.github/skills/run-test-rig/startup.gcode klippy-test:/tmp/startup.gcode;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Start on Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                ". C:/GIT/YAMMU/Firmware/Sync-TestRig.ps1 -Export;",
+                "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -I /home/user/printer_data/comms/klippy.serial -a /home/user/printer_data/comms/klippy.sock;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "Stop on Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "ssh klippy-test pgrep -f klippy-env/bin/python && kill `pgrep -f klippy-env/bin/python`;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "Run Startup.gcode on Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "ssh klippy-test rm /home/user/printer_data/logs/klippy.log;",
+                "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -i /tmp/startup.gcode -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
+                "ssh klippy-test cat /home/user/printer_data/logs/klippy.log | ForEach-Object { if ($found) { $_ } elseif ($_ -eq '=======================') { $found = $true} } ;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "Read klippy.log on Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "ssh klippy-test cat /home/user/printer_data/logs/klippy.log | ForEach-Object { if ($found) { $_ } elseif ($_ -eq '=======================') { $found = $true} } ;",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+    ]
+}
