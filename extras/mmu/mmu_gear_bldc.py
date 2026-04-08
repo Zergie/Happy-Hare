@@ -34,6 +34,7 @@ class MmuGearBldc:
         self.last_pwm = 0.
         self.last_dir = None
         self.pending_dir = None
+        self.section_name = config.get_name()
 
         self.dir_change_deadtime = config.getfloat('dir_change_deadtime', 0.02, minval=0.)
         self.sync_min_speed = config.getfloat('sync_min_speed', 0.05, minval=0.)
@@ -46,6 +47,7 @@ class MmuGearBldc:
 
         self.max_rpm = config.getfloat('max_rpm', 6000., above=0.)
         self.rotation_distance = config.getfloat('rotation_distance', 1.0, above=0.)
+        self.direction_map = self._load_direction_map(config)
 
         self.hardware_pwm = config.getboolean('hardware_pwm', False)
         self.cycle_time = config.getfloat('cycle_time', 0.00005, above=0.)
@@ -75,6 +77,58 @@ class MmuGearBldc:
         self.printer.register_event_handler('mmu:synced', self._handle_synced)
         self.printer.register_event_handler('mmu:unsynced', self._handle_unsynced)
         self.printer.register_event_handler('klippy:shutdown', self._handle_shutdown)
+
+    def _load_direction_map(self, config):
+        values = list(config.getintlist('direction_map', []))
+        if not values:
+            return [0] * self.num_gates
+        if len(values) != self.num_gates:
+            raise config.error(
+                "'direction_map' in [%s] must contain exactly %d entries (one per unit-local gate)"
+                % (config.get_name(), self.num_gates)
+            )
+        for idx, value in enumerate(values):
+            if value not in (0, 1):
+                raise config.error(
+                    "'direction_map' in [%s] has invalid value %s at index %d (allowed: 0 or 1)"
+                    % (config.get_name(), value, idx)
+                )
+        return values
+
+    def _get_selected_gate(self):
+        return getattr(self.mmu, 'gate_selected', None)
+
+    def _get_map_value_for_gate(self, gate):
+        if gate is None:
+            return 0
+        if not self.supports_gate(gate):
+            return 0
+        local_gate = gate - self.first_gate
+        if local_gate < 0 or local_gate >= len(self.direction_map):
+            return 0
+        return self.direction_map[local_gate]
+
+    def _map_distance_for_gate(self, requested_dist, gate=None):
+        gate = self._get_selected_gate() if gate is None else gate
+        map_value = self._get_map_value_for_gate(gate)
+        effective_dist = -requested_dist if map_value else requested_dist
+        return effective_dist, map_value, gate
+
+    def _log_map(self, gate, requested_dist, effective_dist, map_value):
+        if not hasattr(self.mmu, 'log_enabled') or not self.mmu.log_enabled(self.mmu.LOG_STEPPER):
+            return
+        effective_dir = 'forward' if effective_dist >= 0. else 'reverse'
+        self.mmu.log_stepper(
+            "BLDC_MAP: gate=%s requested_dist=%.3f effective_dist=%.3f map_value=%d effective_dir=%s unit=%s"
+            % (gate, requested_dist, effective_dist, map_value, effective_dir, self.section_name)
+        )
+
+    def _map_forward_for_gate(self, requested_forward, requested_speed):
+        gate = self._get_selected_gate()
+        requested_dist = abs(requested_speed) if requested_forward else -abs(requested_speed)
+        effective_dist, map_value, gate = self._map_distance_for_gate(requested_dist, gate)
+        self._log_map(gate, requested_dist, effective_dist, map_value)
+        return effective_dist >= 0.
 
     def supports_gate(self, gate):
         return gate is not None and self.first_gate <= gate < self.first_gate + self.num_gates
@@ -152,7 +206,9 @@ class MmuGearBldc:
         if speed <= 0.:
             return 0.
 
-        forward = dist > 0.
+        effective_dist, map_value, gate = self._map_distance_for_gate(dist)
+        self._log_map(gate, dist, effective_dist, map_value)
+        forward = effective_dist > 0.
         rpm = 60. * speed / self.rotation_distance
         self._set_target(rpm, forward)
         self.reactor.pause(self.reactor.monotonic() + abs(dist) / speed)
@@ -167,7 +223,9 @@ class MmuGearBldc:
         if speed <= 0.:
             self.stop()
             return
-        forward = dist > 0.
+        effective_dist, map_value, gate = self._map_distance_for_gate(dist)
+        self._log_map(gate, dist, effective_dist, map_value)
+        forward = effective_dist > 0.
         rpm = 60. * speed / self.rotation_distance
         self._set_target(rpm, forward)
 
@@ -254,7 +312,7 @@ class MmuGearBldc:
             return eventtime + self.SYNC_POLL_INTERVAL
 
         rpm = 60. * abs(speed) / self.rotation_distance
-        self._set_target(rpm, speed >= 0.)
+        self._set_target(rpm, self._map_forward_for_gate(speed >= 0., speed))
 
         if self.tachometer is not None:
             measured = self.get_rpm()
