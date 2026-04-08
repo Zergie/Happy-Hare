@@ -305,19 +305,43 @@ class MmuMachine:
         # Expand config to allow lazy (incomplete) repetitious gear configuration for type-B MMU's
         self.multigear = False
         self.use_bldc_gear = False
+        self.use_stepper_gear = False
+        self.unit_gear_drives = {}
+        self.stepper_gate_index = {}
 
         has_stepper_gear = config.has_section(GEAR_STEPPER_CONFIG)
-        bldc_sections = [s for s in config.fileconfig.sections() if s == BLDC_GEAR_CONFIG or s.startswith(BLDC_GEAR_CONFIG + " ")]
-        self.use_bldc_gear = bool(bldc_sections)
+        has_shared_bldc = config.has_section(BLDC_GEAR_CONFIG)
+        if has_shared_bldc and has_stepper_gear:
+            raise config.error(
+                "Both [%s] and shared [%s] are configured. Mixed topology requires per-unit BLDC sections."
+                % (GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG)
+            )
 
-        if has_stepper_gear and self.use_bldc_gear:
-            raise config.error("Both [%s] and [%s] are configured. Use exactly one gear drive definition." % (GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG))
-        if not has_stepper_gear and not self.use_bldc_gear:
-            raise config.error("No MMU gear drive configured. Define either [%s] or [%s]." % (GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG))
+        for unit in self.units:
+            unit_has_bldc = any(config.has_section(section) for section in self.get_bldc_section_names_for_unit(unit, include_shared=False))
+            if unit_has_bldc or has_shared_bldc:
+                self.unit_gear_drives[unit.unit_index] = 'bldc'
+            elif has_stepper_gear:
+                self.unit_gear_drives[unit.unit_index] = 'stepper'
+            else:
+                raise config.error(
+                    "No MMU gear drive configured for %s. Define [%s] or a per-unit [%s %s] section."
+                    % (unit.name, GEAR_STEPPER_CONFIG, BLDC_GEAR_CONFIG, unit.name)
+                )
+
+        self.use_bldc_gear = any(drive == 'bldc' for drive in self.unit_gear_drives.values())
+        self.use_stepper_gear = any(drive == 'stepper' for drive in self.unit_gear_drives.values())
+
+        stepper_gate_index = 0
+        for gate in range(self.num_gates):
+            if self.gate_uses_stepper(gate):
+                self.stepper_gate_index[gate] = stepper_gate_index
+                stepper_gate_index += 1
+        self.stepper_gate_count = stepper_gate_index
 
         # Find the TMC controller for base stepper so we can fill in missing config for other matching steppers
         base_tmc_chip = base_tmc_section = None
-        if has_stepper_gear:
+        if self.use_stepper_gear:
             for chip in TMC_CHIPS:
                 base_tmc_section = '%s %s' % (chip, GEAR_STEPPER_CONFIG)
                 if config.has_section(base_tmc_section):
@@ -325,7 +349,7 @@ class MmuMachine:
                     break
 
         last_gear = 24
-        if has_stepper_gear:
+        if self.use_stepper_gear:
             for i in range(1, last_gear): # Don't allow "_0" or it is confusing with unprefixed initial stepper
                 section = "%s_%d" % (GEAR_STEPPER_CONFIG, i)
                 if not config.has_section(section):
@@ -355,8 +379,8 @@ class MmuMachine:
                                     config.fileconfig.set(tmc_section, key, base_value)
 
         # H/W validation checks
-        if self.multigear and last_gear != self.num_gates:
-            raise config.error("MMU is configured with %d gates but %d gear stepper configurations were found" % (self.num_gates, last_gear))
+        if self.multigear and last_gear != self.stepper_gate_count:
+            raise config.error("MMU stepper gear drive resolves %d gates but %d gear stepper configurations were found" % (self.stepper_gate_count, last_gear))
 
         # TODO add more h/w validation here based on num_gates & vendor, virtual selector, etc
         # TODO would allow for easier to understand error messages for conflicting or missing
@@ -380,6 +404,7 @@ class MmuMachine:
             unit_info['can_crossload'] = self.can_crossload
             unit_info['has_bypass'] = self.has_bypass
             unit_info['multi_gear'] = self.multigear
+            unit_info['gear_drive'] = self.unit_gear_drives[i]
             if self.environment_sensor or self.filament_heater:
                 # Single heater/sensor
                 unit_info['environment_sensor'] = self.environment_sensor
@@ -401,6 +426,39 @@ class MmuMachine:
         if gate >= 0 and gate < self.num_gates:
             return self.unit_by_gate[gate]
         return None
+
+    def get_bldc_section_names_for_unit(self, unit, include_shared=True):
+        section_names = ['%s %s' % (BLDC_GEAR_CONFIG, unit.name)]
+        legacy_section = '%s unit%d' % (BLDC_GEAR_CONFIG, unit.unit_index + 1)
+        if legacy_section not in section_names:
+            section_names.append(legacy_section)
+        if include_shared:
+            section_names.append(BLDC_GEAR_CONFIG)
+        return section_names
+
+    def unit_uses_bldc(self, unit_index):
+        return self.unit_gear_drives.get(unit_index) == 'bldc'
+
+    def unit_uses_stepper(self, unit_index):
+        return self.unit_gear_drives.get(unit_index) == 'stepper'
+
+    def gate_uses_bldc(self, gate):
+        unit = self.get_mmu_unit_by_gate(gate)
+        return bool(unit and self.unit_uses_bldc(unit.unit_index))
+
+    def gate_uses_stepper(self, gate):
+        unit = self.get_mmu_unit_by_gate(gate)
+        return bool(unit and self.unit_uses_stepper(unit.unit_index))
+
+    def get_stepper_section_for_gate(self, gate):
+        if not self.gate_uses_stepper(gate):
+            return None
+        stepper_gate_index = self.stepper_gate_index.get(gate)
+        if stepper_gate_index is None:
+            return None
+        if stepper_gate_index == 0:
+            return GEAR_STEPPER_CONFIG
+        return '%s_%d' % (GEAR_STEPPER_CONFIG, stepper_gate_index)
 
     def get_status(self, eventtime):
         return self.unit_status
@@ -613,14 +671,11 @@ class MmuToolHead(toolhead.ToolHead, object):
     # Gear/Extruder synchronization and stepper swapping management...
 
     def select_gear_stepper(self, gate):
-        if not self.mmu_machine.multigear: return
+        if not self.mmu_machine.use_stepper_gear:
+            return
         with self._resync_lock:
-            if gate == 0:
-                self._reconfigure_rail_no_lock([GEAR_STEPPER_CONFIG])
-            elif gate > 0:
-                self._reconfigure_rail_no_lock(["%s_%d" % (GEAR_STEPPER_CONFIG, gate)])
-            else:
-                self._reconfigure_rail_no_lock(None)
+            stepper_section = self.mmu_machine.get_stepper_section_for_gate(gate)
+            self._reconfigure_rail_no_lock([stepper_section] if stepper_section else None)
 
     def _reconfigure_rail_no_lock(self, selected):
         m_th = self.mmu_toolhead
@@ -1049,9 +1104,9 @@ class MmuKinematics:
             self.rails.append(MmuLookupMultiRail(config.getsection(SELECTOR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
             self.rails[0].setup_itersolve('cartesian_stepper_alloc', b'x')
         else:
-            self.rails.append(DummyRail())
-        if self.mmu_machine.use_bldc_gear:
-            self.rails.append(DummyRail())
+            self.rails.append(DummyRail(self.printer))
+        if not self.mmu_machine.use_stepper_gear:
+            self.rails.append(DummyRail(self.printer))
         else:
             self.rails.append(MmuLookupMultiRail(config.getsection(GEAR_STEPPER_CONFIG), need_position_minmax=False, default_position_endstop=0.))
             self.rails[1].setup_itersolve('cartesian_stepper_alloc', b'y')
@@ -1350,11 +1405,12 @@ class MmuExtruderStepper(ExtruderStepper, object):
             gcmd.respond_info(msg, log=False)
 
 class DummyRail:
-    def __init__(self):
+    def __init__(self, printer):
         self.steppers = []
         self.endstops = []
         self.extra_endstops = []
         self.rail_name = "Dummy"
+        self.printer = printer
 
     def get_name(self):
         return self.rail_name
@@ -1366,10 +1422,19 @@ class DummyRail:
         return self.endstops
 
     def get_extra_endstop_names(self):
-        return []
+        return [x[1] for x in self.extra_endstops]
 
-    def get_extra_endstop(self, _name):
+    def get_extra_endstop(self, name):
+        for x in self.extra_endstops:
+            if x[1] == name:
+                return [x]
         return None
+
+    def add_extra_endstop(self, pin, name, register=True, bind_rail_steppers=True, mcu_endstop=None):
+        # Create and track a dummy endstop so it can be queried later
+        dummy = self.DummyEndstop(self.printer, name)
+        self.extra_endstops.append((dummy, name))
+        return dummy
 
     def is_endstop_virtual(self, _name):
         return False
@@ -1382,6 +1447,29 @@ class DummyRail:
 
     def set_position(self, newpos):
         pass
+
+    class DummyEndstop:
+        def __init__(self, printer, sensor_name):
+            self.printer = printer
+            if sensor_name.startswith("unit_"):
+                self.sensor_name = sensor_name.split("_", 2)[-1]
+            else:
+                self.sensor_name = sensor_name
+            self._last_state = False
+
+        def add_stepper(self, *args, **kwargs):
+            pass
+
+        def query_endstop(self, print_time):
+            # For BLDC setups with real sensors, check actual sensor state via printer's sensor manager
+            # This must be called on every poll to detect state changes during homing moves
+            mmu = self.printer.lookup_object('mmu')
+            if mmu and hasattr(mmu, 'sensor_manager'):
+                sensor_state = mmu.sensor_manager.check_sensor(self.sensor_name)
+                if sensor_state is not None:
+                    return bool(sensor_state)
+            return None
+
 
 
 def load_config(config):

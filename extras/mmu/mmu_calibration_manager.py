@@ -441,7 +441,7 @@ class MmuCalibrationManager:
             mean_neg = self.mmu._sample_stats(neg_values)['mean']
             mean = (float(mean_pos) + float(mean_neg)) / 2
             ratio = mean / length
-            if self.mmu.has_bldc_gear():
+            if self.mmu.has_bldc_gear(gate):
                 bldc = self.mmu._get_bldc_for_gate(gate)
                 current_rd = bldc.get_rotation_distance() if bldc is not None else self.mmu.default_rotation_distance
             else:
@@ -514,7 +514,11 @@ class MmuCalibrationManager:
                 homing_movement > 0
             ):
                 if direction in [self.mmu.DIRECTION_LOAD, self.mmu.DIRECTION_UNLOAD]:
-                    current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]
+                    if self.mmu.has_bldc_gear(self.mmu.gate_selected):
+                        bldc = self.mmu._get_bldc_for_gate(self.mmu.gate_selected)
+                        current_rd = bldc.get_rotation_distance() if bldc is not None else self.mmu.default_rotation_distance
+                    else:
+                        current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]
                     new_rd = round(bowden_move_ratio * current_rd, 4)
                     gate0_rd = self.mmu.rotation_distances[0]
 
