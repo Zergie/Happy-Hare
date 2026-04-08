@@ -77,11 +77,11 @@
             }
         },
         {
-            "label": "Read klippy.log on Test Rig",
+            "label": "Get klippy.log from Test Rig",
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
-                "ssh klippy-test cat /home/user/printer_data/logs/klippy.log | ForEach-Object { if ($found) { $_ } elseif ($_ -eq '=======================') { $found = $true} } ;",
+                "scp klippy-test:/home/user/printer_data/logs/klippy.log \"c:\\temp\\klippy.log\";",
                 "}"
             ],
             "problemMatcher": [],

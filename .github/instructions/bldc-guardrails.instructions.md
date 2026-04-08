@@ -31,16 +31,4 @@ Apply these rules for BLDC-related work in Happy-Hare Python files.
 
 ## Multi-MMU Behavior
 - Support per-unit BLDC sections (for example `[mmu_gear_bldc unit1]`, `[mmu_gear_bldc unit2]`) with correct gate-range routing.
-
-## Acceptance Configuration
-- Ensure this BLDC config works:
-```ini
-[mmu_gear_bldc]
-dir_pin: mmu:YAMMU_ESPOOLER_DIR_0
-pwm_pin: mmu:YAMMU_ESPOOLER_PWM_0
-pwm_min: 0.85
-pwm_max: 1.00
-hardware_pwm: True
-cycle_time: 0.00005
-mm_per_rev: 1.0
-```
+- Mixed topology must be possible: one MMU unit may use BLDC while another unit uses stepper gear drive in the same configuration.
