@@ -37,7 +37,8 @@
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
                 ". C:/GIT/YAMMU/Firmware/Sync-TestRig.ps1 -Export;",
-                "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -I /home/user/printer_data/comms/klippy.serial -a /home/user/printer_data/comms/klippy.sock;",
+                "ssh klippy-test rm /home/user/printer_data/logs/klippy.log;",
+                "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -I /home/user/printer_data/comms/klippy.serial -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
                 "}"
             ],
             "problemMatcher": [],
@@ -67,7 +68,6 @@
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
                 "ssh klippy-test rm /home/user/printer_data/logs/klippy.log;",
                 "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -i /tmp/startup.gcode -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
-                "ssh klippy-test cat /home/user/printer_data/logs/klippy.log | ForEach-Object { if ($found) { $_ } elseif ($_ -eq '=======================') { $found = $true} } ;",
                 "}"
             ],
             "problemMatcher": [],
@@ -81,7 +81,7 @@
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
-                "scp klippy-test:/home/user/printer_data/logs/klippy.log \"c:\\temp\\klippy.log\";",
+                "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
                 "}"
             ],
             "problemMatcher": [],

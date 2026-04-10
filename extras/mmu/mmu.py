@@ -36,7 +36,7 @@ from .mmu_led_manager           import MmuLedManager
 from .mmu_sync_feedback_manager import MmuSyncFeedbackManager
 from .mmu_calibration_manager   import MmuCalibrationManager
 from .mmu_environment_manager   import MmuEnvironmentManager
-from .mmu_gear_bldc            import MmuGearBldc
+from .mmu_gear_bldc             import MmuGearBldc
 
 
 # Main klipper module
@@ -5646,7 +5646,7 @@ class Mmu:
 
             if self.has_bldc_gear(self.gate_selected) and motor in ["gear", "gear+extruder"]:
                 # BLDC homing uses sensor-based polling instead of Klipper HomingMove
-                return self._trace_bldc_homing_move(trace_str, dist, speed, accel, motor, homing_move, endstop_name)
+                return self.trace_bldc_filament_move(trace_str, dist, speed, accel, motor, homing_move, endstop_name)
 
         # Set sensible speeds and accelaration if not supplied
         if motor in ["gear"]:
@@ -5838,7 +5838,7 @@ class Mmu:
         return actual, homed, measured, delta
 
     # BLDC-specific homing using sensor-based polling instead of stepper HomingMove
-    def _trace_bldc_homing_move(self, trace_str, dist, speed, accel, motor, homing_move, endstop_name):
+    def trace_bldc_filament_move(self, trace_str, dist, speed, accel, motor, homing_move, endstop_name):
         encoder_start = self.get_encoder_distance(dwell=False)
         pos = self.mmu_toolhead.get_position()
         init_pos = pos[1]
@@ -6685,14 +6685,14 @@ class Mmu:
         self.log_debug("Assertion failure: Gate %d has no unit!" % gate)
         return 0
 
-    def _reconcile_active_gear_stepper(self, gate=None, force=False):
+    def _reconcile_active_gear_stepper(self, gate=None):
         if not self.mmu_machine.use_stepper_gear:
             return
         if not hasattr(self, 'mmu_toolhead') or self.mmu_toolhead is None:
             return
 
         sync_mode = self.mmu_toolhead.sync_mode
-        if not force and sync_mode not in [None, MmuToolHead.GEAR_ONLY]:
+        if sync_mode not in [None, MmuToolHead.GEAR_ONLY]:
             return
 
         self.mmu_toolhead.select_gear_stepper(self.gate_selected if gate is None else gate)

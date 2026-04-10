@@ -9,7 +9,7 @@
 #
 
 from .. import output_pin, pulse_counter
-from ..mmu_espooler import GCodeRequestQueue as FallbackGCodeRequestQueue
+from .. import mmu_espooler
 
 
 class MmuGearBldc:
@@ -33,12 +33,10 @@ class MmuGearBldc:
 
         self.last_pwm = 0.
         self.last_dir = None
-        self.pending_dir = None
         self.section_name = config.get_name()
 
         self.dir_change_deadtime = config.getfloat('dir_change_deadtime', 0.02, minval=0.)
         self.sync_min_speed = config.getfloat('sync_min_speed', 0.05, minval=0.)
-        self.sync_confidence_timeout = config.getfloat('sync_confidence_timeout', 0.5, above=0.)
 
         self.pwm_min = config.getfloat('pwm_min', 0.85, minval=0., maxval=1.)
         self.pwm_max = config.getfloat('pwm_max', 1.0, minval=0., maxval=1.)
@@ -140,7 +138,7 @@ class MmuGearBldc:
         if hasattr(output_pin, 'GCodeRequestQueue'):
             self.gcrqs[mcu] = output_pin.GCodeRequestQueue(self.config, mcu, self._set_pin)
         else:
-            self.gcrqs[mcu] = FallbackGCodeRequestQueue(self.config, mcu, self._set_pin)
+            self.gcrqs[mcu] = mmu_espooler.GCodeRequestQueue(self.config, mcu, self._set_pin)
 
     def _set_pin(self, print_time, req):
         mcu_pin, value = req
@@ -198,22 +196,6 @@ class MmuGearBldc:
 
     def stop(self):
         self._send_pin(self.mcu_pwm_pin, 0.)
-
-    def run_distance(self, dist, speed):
-        if dist == 0.:
-            return 0.
-        speed = abs(speed)
-        if speed <= 0.:
-            return 0.
-
-        effective_dist, map_value, gate = self._map_distance_for_gate(dist)
-        self._log_map(gate, dist, effective_dist, map_value)
-        forward = effective_dist > 0.
-        rpm = 60. * speed / self.rotation_distance
-        self._set_target(rpm, forward)
-        self.reactor.pause(self.reactor.monotonic() + abs(dist) / speed)
-        self.stop()
-        return dist
 
     def start_move(self, dist, speed):
         if dist == 0.:
