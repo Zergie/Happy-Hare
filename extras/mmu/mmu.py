@@ -5694,6 +5694,9 @@ class Mmu:
             speed *= adjust
             accel *= adjust
 
+        if motor in ["gear", "gear+extruder", "synced"]:
+            self._reconcile_active_gear_stepper(self.gate_selected)
+
         def _set_sync_mode(sync_mode):
             self.mmu_toolhead.sync(sync_mode)
             if sync_mode == MmuToolHead.GEAR_SYNCED_TO_EXTRUDER:
@@ -6658,6 +6661,11 @@ class Mmu:
             self.sensor_manager.reset_active_unit(new_unit)
 
         self.sensor_manager.reset_active_gate(self.gate_selected) # Call after unit_selected is set
+
+        # Keep selected gear stepper aligned with active gate/unit so BLDC-selected gates
+        # cannot retain a stale stepper selection from another unit.
+        self._reconcile_active_gear_stepper(gate)
+
         self.sync_feedback_manager.set_default_rd() # Will always set rotation_distance
 
         self.save_variable(self.VARS_MMU_GATE_SELECTED, self.gate_selected, write=True)
@@ -6676,6 +6684,18 @@ class Mmu:
             return unit.unit_index
         self.log_debug("Assertion failure: Gate %d has no unit!" % gate)
         return 0
+
+    def _reconcile_active_gear_stepper(self, gate=None, force=False):
+        if not self.mmu_machine.use_stepper_gear:
+            return
+        if not hasattr(self, 'mmu_toolhead') or self.mmu_toolhead is None:
+            return
+
+        sync_mode = self.mmu_toolhead.sync_mode
+        if not force and sync_mode not in [None, MmuToolHead.GEAR_ONLY]:
+            return
+
+        self.mmu_toolhead.select_gear_stepper(self.gate_selected if gate is None else gate)
 
     # Set the active gear stepper rotation distance
     def set_gear_rotation_distance(self, rd):
