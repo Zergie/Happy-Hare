@@ -1,14 +1,14 @@
 ---
 name: output-pin-interactions
-description: 'Use when interacting with Klipper output pins in Happy Hare (PWM/digital), including setup_pin timing, hardware_pwm/cycle_time config, GCodeRequestQueue scheduling, and debugging pin timing errors.'
-argument-hint: 'Describe the pin use case (e.g., BLDC, espooler, servo-like PWM) and the error or behavior to fix.'
+description: 'Use for Klipper output-pin work in Happy Hare (PWM/digital): setup_pin timing, hardware_pwm/cycle_time config, GCodeRequestQueue scheduling, pin timing error debug.'
+argument-hint: 'Describe pin use case (BLDC, espooler, servo-like PWM) and error/behavior to fix.'
 user-invocable: true
 ---
 
 # Output Pin Interactions
 
 ## Scope
-- Workspace skill for the Happy-Hare repository.
+- Workspace skill for `Happy-Hare` repo.
 
 ## When To Use
 - Adding or refactoring motor/pin control that uses Klipper output pins.
@@ -29,8 +29,8 @@ user-invocable: true
 - Whether value changes are frequent or bursty.
 
 2. Parse config from the owning section.
-- Read required pin names from your feature section (for example `[mmu_gear_bldc]`).
-- Parse and validate PWM options in that same section: `hardware_pwm`, `cycle_time`, min/max, defaults.
+- Read required pin names from feature section (example `[mmu_gear_bldc]`).
+- Parse and validate PWM options in same section: `hardware_pwm`, `cycle_time`, min/max, defaults.
 
 3. Create pin objects during config/init phase.
 - Use `ppins = printer.lookup_object('pins')`.
@@ -72,10 +72,10 @@ user-invocable: true
 - Else use `GCodeRequestQueue` from `extras/mmu_espooler.py`.
 - Queue instance policy:
 - Store queues in `self.gcrqs`.
-- Reuse the existing queue for that MCU and never create more than one queue per MCU.
+- Reuse existing queue for that MCU. Never create >1 queue per MCU.
 
 - Configuration source:
-- If feature section owns the hardware, keep all pin/PWM options there.
+- If feature section owns hardware, keep all pin/PWM options there.
 - Use external pin sections only when the feature must share ownership.
 
 - Write strategy:
@@ -83,7 +83,7 @@ user-invocable: true
 - One-shot setup values can be configured at start-value stage.
 
 ## Completion Checklist
-- [ ] Pins are configured from the feature section.
+- [ ] Pins configured from feature section.
 - [ ] `hardware_pwm` and `cycle_time` are parsed and applied.
 - [ ] Pin objects are created during config/init, not late runtime.
 - [ ] Write path uses request queue callbacks.

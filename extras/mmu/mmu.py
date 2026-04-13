@@ -2446,6 +2446,7 @@ class Mmu:
             self.log_warning("Will temporarily sync, but filament position does not indicate in extruder!\nUse 'MMU_RECOVER' to correct the filament position.")
 
         self.reset_sync_gear_to_extruder(sync, force_grip=True, skip_extruder_check=True)
+        self._route_bldc_sync_to_selected_gate(sync)
 
 
 #########################
@@ -3501,6 +3502,14 @@ class Mmu:
             gate = self.gate_selected
         unit_index = self.find_unit_by_gate(gate if gate is not None else 0)
         return self.bldc_by_unit.get(unit_index)
+
+    def _route_bldc_sync_to_selected_gate(self, sync_enabled):
+        if not self.has_bldc_gear():
+            return None
+        selected = self._get_bldc_for_gate(self.gate_selected)
+        for bldc in set(self.bldc_by_unit.values()):
+            bldc.set_sync_enabled(sync_enabled and bldc is selected)
+        return selected
 
     def _check_has_espooler(self):
         if not self.has_espooler():
@@ -5788,6 +5797,8 @@ class Mmu:
             # Extruder is driving, gear rail is following
             elif motor in ["synced"]:
                 _set_sync_mode(MmuToolHead.GEAR_SYNCED_TO_EXTRUDER)
+                if self.has_bldc_gear(self.gate_selected):
+                    bldc = self._route_bldc_sync_to_selected_gate(True)
                 if homing_move != 0:
                     self.log_error("Not possible to perform homing move while synced")
                 else:

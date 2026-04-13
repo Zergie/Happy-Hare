@@ -1,73 +1,73 @@
 ---
 name: variable-naming
-description: 'Use when naming or renaming variables in Happy-Hare Python code. Covers naming rules, scope-aware conventions, BLDC/MMU domain terminology, and safe consistency checks before applying minimal edits.'
-argument-hint: 'Describe what you are naming (new var, rename, or cleanup), language/file scope, and any style constraints.'
+description: 'Use for var naming/renaming in Happy-Hare Python. Rules: scope, BLDC/MMU terms, consistency checks, minimal edits.'
+argument-hint: 'Describe task: new var | rename | cleanup. Add file/scope + style constraints.'
 user-invocable: true
 ---
 
 # Variable Naming
 
 ## When To Use
-- Introducing new variables in Happy-Hare code.
-- Renaming unclear or inconsistent variable names.
-- Aligning variable names with MMU/BLDC domain terminology.
-- Reviewing naming quality during refactors with minimal diffs.
+- Add new vars in Happy-Hare code.
+- Rename unclear/inconsistent vars.
+- Align names with MMU/BLDC domain terms.
+- Review naming during refactor with minimal diff.
 
 ## Outcome
-Produce names that are clear, stable, and consistent with existing Happy-Hare style while minimizing behavior risk.
+Produce names clear + stable + style-consistent. Keep behavior risk low.
 
 ## Procedure
 1. Identify scope and lifetime.
-- Local temporary value: short but meaningful (`rpm`, `dt`, `gate`).
-- Instance state: `self.` names that describe persistent intent (`self.bldc_mm_per_rev`).
-- Constant/class-level value: uppercase snake case (`SENSOR_EXTRUDER_ENTRY`).
+- Local temp: short + meaningful (`rpm`, `dt`, `gate`).
+- Instance state: `self.` names for persistent intent (`self.bldc_mm_per_rev`).
+- Const/class-level: UPPER_SNAKE_CASE (`SENSOR_EXTRUDER_ENTRY`).
 
 2. Match existing project conventions first.
-- Follow file-local patterns before introducing new style.
+- Follow file-local patterns first.
 - Prefer snake_case for variables and attributes.
 - Keep domain prefixes when useful (`bldc_`, `mmu_`, `gate_`, `toolhead_`).
 
 3. Encode meaning, not implementation trivia.
-- Prefer purpose-based names (`target_rpm`, `sync_state`) over generic names (`value1`, `tmp2`).
-- Use units in names when ambiguity exists (`distance_mm`, `speed_mm_s`).
-- Keep boolean names readable (`is_enabled`, `has_encoder`, `should_sync`).
+- Prefer purpose names (`target_rpm`, `sync_state`) > generic (`value1`, `tmp2`).
+- Add units when ambiguous (`distance_mm`, `speed_mm_s`).
+- Bool names readable (`is_enabled`, `has_encoder`, `should_sync`).
 
 4. Respect runtime context and ownership.
-- Keep names aligned with config keys and GCode concepts where applicable.
+- Keep names aligned with config keys + GCode concepts.
 - For per-unit/per-gate data, include structure hints (`unit_index`, `gate_id`, `unit_to_gates`).
 - Treat names passed to `lookup_object(...)` as fixed contracts.
-- Resolve valid object names from Klipper or Happy-Hare source definitions before editing; do not invent or rename lookup identifiers.
+- Resolve valid object names from Klipper/Happy-Hare source before edit. Never invent/rename lookup identifiers.
 
 5. Choose rename strategy.
-- Single local variable: direct local rename.
-- Shared symbol across a file/module: semantic rename with usage checks.
-- Public or persisted names: preserve compatibility unless explicitly approved.
+- Single local var: direct local rename.
+- Shared symbol across file/module: semantic rename + usage checks.
+- Public/persisted names: keep compatibility unless explicitly approved.
 
 6. Apply minimal edits.
-- Rename only what is needed for clarity.
-- Avoid broad unrelated cleanup in the same change.
+- Rename only needed symbols.
+- Avoid broad unrelated cleanup same change.
 - Preserve APIs and config-facing names unless required.
 
 7. Validate after edits.
 - No broken references/imports.
 - No semantic changes to control flow.
-- Names remain consistent across read/write paths and logs.
+- Names stay consistent across read/write paths + logs.
 
 ## Decision Points
 - Keep vs rename:
-- Keep existing name if already consistent and widely referenced.
-- Rename when it materially improves clarity or prevents misuse.
+- Keep existing name if consistent + widely referenced.
+- Rename when clarity gain material or misuse risk drops.
 
 - lookup_object identifiers:
-- If a string is used in `lookup_object(...)`, keep it unless the underlying provider name is intentionally changed in its defining source.
-- Verify provider names in Klipper/Happy-Hare source before changing any related variable names or lookup strings.
+- If string used in `lookup_object(...)`, keep unless provider name intentionally changed in defining source.
+- Verify provider names in Klipper/Happy-Hare source before changing related var names or lookup strings.
 
 - Domain specificity:
 - Use domain terms when behavior is MMU-specific.
 - Use generic names only for generic utility values.
 
 - Compatibility impact:
-- If name appears in saved variables, config schema, or external macro contracts, prefer backward-compatible handling.
+- If name appears in saved vars, config schema, or external macro contracts -> prefer backward-compatible handling.
 
 ## Quality Checklist
 - [ ] Name reflects intent and scope.
