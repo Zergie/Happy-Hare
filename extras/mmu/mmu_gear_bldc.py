@@ -152,7 +152,7 @@ class ProcessMoveSyncMonitor(SyncMonitorBase):
         move_end_print_time = decel_start_time + move.decel_t
         bldc._log_process_move(print_time, start_speed, cruise_speed, end_speed, move)
 
-        last_scheduled_speed = [None]
+        last_scheduled_speed = [None] # workaround for python 2 .. which is still supported by v3
 
         def schedule_speed(speed, sample_print_time):
             if last_scheduled_speed[0] is not None and abs(speed - last_scheduled_speed[0]) < 1e-9:
@@ -160,27 +160,24 @@ class ProcessMoveSyncMonitor(SyncMonitorBase):
             bldc.set_speed(speed, print_time=sample_print_time, source='process_move_push')
             last_scheduled_speed[0] = speed
 
-        # Phase 1 schedule at move start (non-zero only)
-        first_speed = cruise_speed if abs(cruise_speed) != 0. else start_speed
-        if abs(first_speed) != 0.:
-            schedule_speed(first_speed, print_time)
-
-        # Phase 2 accel window samples in (print_time, accel_end_time]
         if move.accel_t > 0.:
+            # Accel Phase
+            schedule_speed(start_speed, print_time)
+
             for sample_print_time in self._phase_sample_times(print_time, accel_end_time):
                 ratio = (sample_print_time - print_time) / move.accel_t
                 sample_speed = start_speed + (cruise_speed - start_speed) * ratio
                 schedule_speed(sample_speed, sample_print_time)
+        else:
+            # No accel phase, just schedule cruise speed at print_time
+            schedule_speed(cruise_speed, print_time)
 
-        # Phase 3 decel window samples in (decel_start_time, move_end_print_time]
         if move.decel_t > 0.:
+            # Decel Phase
             for sample_print_time in self._phase_sample_times(decel_start_time, move_end_print_time):
                 ratio = (sample_print_time - decel_start_time) / move.decel_t
                 sample_speed = cruise_speed + (end_speed - cruise_speed) * ratio
                 schedule_speed(sample_speed, sample_print_time)
-
-        # Schedule stop at move end
-        bldc.stop(print_time=move_end_print_time)
 
 
 class SampledSyncMonitor(SyncMonitorBase):
@@ -222,7 +219,7 @@ class SampledSyncMonitor(SyncMonitorBase):
     def _timer_callback(self, eventtime):
         """Timer callback for sampling cadence."""
         if not self.is_active_source():
-            return self.active_bldc.reactor.NEVER
+            return self.mmu.printer.get_reactor().NEVER
         self.update(eventtime)
         return eventtime + self.SAMPLE_POLL_INTERVAL
 
@@ -304,11 +301,12 @@ class MmuGearBldc:
         self.last_sync_speed_log_eventtime = None
         self.last_sync_sample_log_eventtime = None
 
+        self.last_req_pwm = 0.
         self.last_pwm = 0.
         self.last_dir = None
         self.section_name = config.get_name()
 
-        self.dir_change_deadtime = config.getfloat('dir_change_deadtime', 0.02, minval=0.)
+        self.kick_start_time = config.getfloat('kick_start_time', 0.1, minval=0.)
         self.sync_speed_factor = config.getfloat('sync_speed_factor', 0.694, above=0.)
         self._sync_monitor_kind = config.getchoice('sync_monitor', {o: o for o in self.SYNC_MONITOR_OPTIONS}, self.MONITOR_PROCESS_MOVE)
 
@@ -335,6 +333,7 @@ class MmuGearBldc:
         self.mcu_pwm_pin.setup_cycle_time(self.cycle_time, self.hardware_pwm)
         self.mcu_pwm_pin.setup_start_value(0., 0.)
 
+        self._kick_uses_repeat = hasattr(output_pin, 'GCodeRequestQueue')
         self._setup_queue(self.mcu_dir_pin)
         self._setup_queue(self.mcu_pwm_pin)
 
@@ -418,12 +417,29 @@ class MmuGearBldc:
     def _set_pin(self, print_time, req):
         mcu_pin, value = req
         if mcu_pin is self.mcu_pwm_pin:
+            self.last_req_pwm = value
+            if value > 0. and self.kick_start_time > 0. and self.last_pwm <= 0.:
+                self.last_pwm = self.pwm_max
+                self.mcu_pwm_pin.set_pwm(print_time, self.pwm_max)
+                self.mmu.log_stepper(
+                    "BLDC_SET_PIN: kick req=%.4f applied=%.4f time=%.3f unit=%s"
+                    % (value, self.pwm_max, print_time or 0., self.section_name)
+                )
+                if self._kick_uses_repeat:
+                    return 'repeat', print_time + self.kick_start_time
+                return 'delay', self.kick_start_time
             if abs(value - self.last_pwm) < 0.0001:
-                self.mmu.log_stepper("BLDC_SET_PIN: discard.")
+                self.mmu.log_stepper(
+                    "BLDC_SET_PIN: discard req=%.4f applied=%.4f unit=%s"
+                    % (value, self.last_pwm, self.section_name)
+                )
                 return 'discard', 0.
             self.last_pwm = value
             self.mcu_pwm_pin.set_pwm(print_time, value)
-            self.mmu.log_stepper("BLDC_SET_PIN: pin=%s value=%.4f time=%.3f" % (mcu_pin._pin, value, print_time or 0.))
+            self.mmu.log_stepper(
+                "BLDC_SET_PIN: pin=%s req=%.4f applied=%.4f time=%.3f unit=%s"
+                % (mcu_pin._pin, self.last_req_pwm, value, print_time or 0., self.section_name)
+            )
             return None
 
         if mcu_pin is self.mcu_dir_pin:
@@ -443,7 +459,6 @@ class MmuGearBldc:
         desired_dir = 1 if forward else 0
         if self.last_dir is None or self.last_dir != desired_dir:
             self._send_pin(self.mcu_dir_pin, desired_dir, print_time)
-            return
 
     def _get_print_time(self, mcu):
         systime = self.reactor.monotonic()
@@ -503,13 +518,7 @@ class MmuGearBldc:
             return
         self.active_sync_monitor.deactivate(self)
 
-    def _rpm_to_pwm(self, rpm):
-        if rpm <= 0.:
-            return 0.
-        ratio = min(rpm / self.max_rpm, 1.)
-        return self.pwm_min + (self.pwm_max - self.pwm_min) * ratio
-
-    def _log_speed(self, source, linear_speed, requested_rpm, clamped_rpm, pwm, forward):
+    def _log_speed(self, source, speed, requested_rpm, clamped_rpm, pwm, forward):
         eventtime = self.reactor.monotonic()
         if source == 'sync':
             if self.last_sync_speed_log_eventtime is not None:
@@ -518,9 +527,15 @@ class MmuGearBldc:
             self.last_sync_speed_log_eventtime = eventtime
         direction = 'forward' if forward else 'reverse'
         self.mmu.log_stepper(
-            "BLDC_SPEED: source=%s linear_speed=%.3f requested_rpm=%.1f clamped_rpm=%.1f pwm=%.4f dir=%s unit=%s"
-            % (source, linear_speed, requested_rpm, clamped_rpm, pwm, direction, self.section_name)
+            "BLDC_SPEED: source=%s speed=%.3f requested_rpm=%.1f clamped_rpm=%.1f pwm=%.4f dir=%s unit=%s"
+            % (source, speed, requested_rpm, clamped_rpm, pwm, direction, self.section_name)
         )
+
+    def _rpm_to_pwm(self, rpm):
+        if rpm <= 0.:
+            return 0.
+        ratio = min(rpm / self.max_rpm, 1.)
+        return self.pwm_min + (self.pwm_max - self.pwm_min) * ratio
 
     def _set_rpm(self, rpm, forward, source='move', linear_speed=0., print_time=None):
         requested_rpm = rpm
@@ -529,12 +544,14 @@ class MmuGearBldc:
         self._log_speed(source, linear_speed, requested_rpm, rpm, pwm, forward)
         t0 = print_time if print_time is not None else self._get_print_time(self.mcu_pwm_pin.get_mcu())
         self._safe_set_direction(forward, t0)
-        if self.last_dir != (1 if forward else 0):
-            t0 += self.dir_change_deadtime
         self._send_pin(self.mcu_pwm_pin, pwm, t0)
 
     def set_speed(self, speed_mm_s, print_time=None, source='move'):
-        if speed_mm_s == 0.:
+        self.mmu.log_stepper(
+            "BLDC_SET_SPEED: requested speed=%.3f mm/s source=%s unit=%s"
+            % (speed_mm_s, source, self.section_name)
+        )
+        if abs(speed_mm_s) < 1e-6:
             self.stop(print_time=print_time)
             return
         forward = self._map_forward_for_gate(speed_mm_s > 0., speed_mm_s)
@@ -542,7 +559,7 @@ class MmuGearBldc:
         self._set_rpm(rpm, forward, source=source, linear_speed=abs(speed_mm_s), print_time=print_time)
 
     def stop(self, print_time=None):
-        if self.last_pwm > 0.:
+        if abs(self.last_pwm) > 1e-6:
             self._send_pin(self.mcu_pwm_pin, 0., print_time)
 
     def start_move(self, dist, speed):
@@ -566,7 +583,7 @@ class MmuGearBldc:
 
     def get_status(self, _eventtime):
         return {
-            'active': self.last_pwm > 0.,
+            'active': abs(self.last_pwm) > 1e-6,
             'pwm': self.last_pwm,
             'dir': self.last_dir,
             'rotation_distance': self.rotation_distance,

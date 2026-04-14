@@ -5804,8 +5804,6 @@ class Mmu:
                 else:
                     if self.log_enabled(self.LOG_STEPPER):
                         self.log_stepper("%s MOVE: dist=%.1f, speed=%.1f, accel=%.1f, wait=%s" % (motor.upper(), dist, speed, accel, wait))
-                    if bldc_active_move:
-                        bldc.start_move_hold(dist, speed)
                     ext_pos[3] += dist
                     self.toolhead.move(ext_pos, speed)
 
