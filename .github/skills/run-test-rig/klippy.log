@@ -1,5 +1,5 @@
 Starting Klippy...
-Args: ['/home/user/klipper/klippy/klippy.py', '/home/user/printer_data/config/printer.cfg', '-i', '/tmp/startup.gcode', '-l', '/home/user/printer_data/logs/klippy.log', '-a', '/home/user/printer_data/comms/klippy.sock']
+Args: ['/home/user/klipper/klippy/klippy.py', '/home/user/printer_data/config/printer.cfg', '-I', '/home/user/printer_data/comms/klippy.serial', '-l', '/home/user/printer_data/logs/klippy.log', '-a', '/home/user/printer_data/comms/klippy.sock']
 Git version: 'v0.13.0-463-g2bd0acb6-dirty'
 Untracked files: klippy/extras/mmu_encoder.py, klippy/extras/mmu_espooler.py, klippy/extras/mmu_led_effect.py, klippy/extras/mmu_leds.py, klippy/extras/mmu_machine.py, klippy/extras/mmu_sensors.py, klippy/extras/mmu_servo.py
 Branch: master
@@ -9,7 +9,7 @@ CPU: 4 core ?
 Device: Raspberry Pi 5 Model B Rev 1.1
 Linux: Linux version 6.12.62+rpt-rpi-2712 (serge@raspberrypi.com) (aarch64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT Debian 1:6.12.62-1+rpt1 (2025-12-18)
 Python: '3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]'
-Start printer at Mon Apr 13 15:59:14 2026 (1776088754.9 535321.2)
+Start printer at Mon Apr 20 22:12:34 2026 (1776715954.8 1162523.6)
 ===== Config file =====
 [virtual_sdcard]
 path = /home/user/printer_data/gcodes
@@ -239,14 +239,12 @@ aliases =
 	MMU_SERVO_3=gpio19,
 	
 	
-	YAMMU_ESPOOLER_PWM_0=gpio4,
-	YAMMU_ESPOOLER_DIR_0=gpio2,
-	YAMMU_ESPOOLER_PWM_1=gpio7,
-	YAMMU_ESPOOLER_DIR_1=gpio21,
-	
-	
-	MMU_ENCODER_0=gpio3,
-	MMU_ENCODER_1=gpio11,
+	YAMMU_BLDC_PWM_0=gpio4,
+	YAMMU_BLDC_DIR_0=gpio2,
+	YAMMU_BLDC_TACH_0=gpio21,
+	YAMMU_BLDC_DIR_1=gpio20,
+	YAMMU_BLDC_PWM_1=gpio7,
+	YAMMU_BLDC_TACH_1=gpio11,
 
 [gcode_macro _MMU_CUT_TIP]
 description = Cut filament by pressing the cutter on a pin with a horizontal movement
@@ -635,31 +633,42 @@ environment_sensor =
 homing_extruder = 1
 
 [duplicate_pin_override]
-pins = mmu:YAMMU_ESPOOLER_DIR
+pins = mmu:YAMMU_BLDC_DIR
 
 [mmu_gear_bldc unit0]
-dir_pin = mmu:YAMMU_ESPOOLER_DIR_0
+dir_pin = mmu:YAMMU_BLDC_DIR_0
 direction_map = 0,1,0,1
-pwm_pin = !mmu:YAMMU_ESPOOLER_PWM_0
+pwm_pin = !mmu:YAMMU_BLDC_PWM_0
 pwm_min = 0.85
 pwm_max = 1.00
 hardware_pwm = True
 cycle_time = 0.00005
 rotation_distance = 3.6029
 max_rpm = 6000
-dir_change_deadtime = 0.04
+kick_start_time = 0.10
+tachometer_pin = ^mmu:YAMMU_BLDC_TACH_0
+tachometer_ppr = 9
+tachometer_sample_time = 0.02
+tachometer_poll_interval = 0.00025
+tachometer_control_enabled = 1
+tachometer_control_kp = 0.3
+tachometer_control_max_delta_pwm = 0.02
 
 [mmu_gear_bldc unit1]
-dir_pin = mmu:YAMMU_ESPOOLER_DIR_1
+dir_pin = mmu:YAMMU_BLDC_DIR_1
 direction_map = 0,1,0,1
-pwm_pin = !mmu:YAMMU_ESPOOLER_PWM_1
+pwm_pin = !mmu:YAMMU_BLDC_PWM_1
 pwm_min = 0.85
 pwm_max = 1.00
 hardware_pwm = True
 cycle_time = 0.00005
 rotation_distance = 3.6029
 max_rpm = 6000
-dir_change_deadtime = 0.04
+kick_start_time = 0.10
+tachometer_pin = ^mmu:YAMMU_BLDC_TACH_1
+tachometer_ppr = 9
+tachometer_sample_time = 0.02
+tachometer_poll_interval = 0.00025
 
 [stepper_mmu_gear]
 step_pin = gpio11
@@ -1039,12 +1048,12 @@ gear_unload_accel = 100
 gear_short_move_speed = 200
 gear_short_move_accel = 100
 gear_short_move_threshold = 70
-gear_homing_speed = 100
-extruder_load_speed = 100
-extruder_unload_speed = 100
-extruder_sync_load_speed = 100
+gear_homing_speed = 250
+extruder_load_speed = 20
+extruder_unload_speed = 200
+extruder_sync_load_speed = 20
 extruder_sync_unload_speed = 200
-extruder_homing_speed = 100
+extruder_homing_speed = 15
 selector_move_speed = 200
 selector_homing_speed = 60
 selector_touch_speed = 80
@@ -1060,7 +1069,7 @@ gate_endstop_to_encoder = 10
 gate_unload_buffer = 50
 gate_load_retries = 2
 gate_autoload = 1
-gate_final_eject_distance = 0
+gate_final_eject_distance = 600
 bowden_homing_max = 1500
 bowden_apply_correction = 0
 bowden_allowable_load_delta = 20.0
@@ -1071,9 +1080,9 @@ extruder_homing_endstop = extruder
 extruder_homing_buffer = 25
 extruder_collision_homing_current = 100
 extruder_force_homing = 0
-toolhead_homing_max = 240
+toolhead_homing_max = 320
 toolhead_extruder_to_nozzle = 72
-toolhead_sensor_to_nozzle = 62
+toolhead_sensor_to_nozzle = 12
 toolhead_entry_to_extruder = 30
 toolhead_residual_filament = 0
 toolhead_ooze_reduction = 0
@@ -1083,7 +1092,7 @@ toolhead_post_load_tension_adjust = 1
 toolhead_entry_tension_test = 0
 toolhead_move_error_tolerance = 60
 force_form_tip_standalone = 1
-form_tip_macro = _MMU_FORM_TIP
+form_tip_macro = _YAMMU_FORM_TIP
 extruder_form_tip_current = 100
 slicer_tip_park_pos = 0
 force_purge_standalone = 0
@@ -1122,7 +1131,7 @@ heater_vent_macro = _MMU_VENT
 heater_vent_interval = 0
 heater_rotate_interval = 5
 drying_data = { 'pla': (45, 300), 'pla+': (55, 300), 'petg': (60, 300), 'tpu': (55, 300), 'abs': (70, 300), 'abs+': (75, 300), 'asa': (65, 300), 'nylon': (75, 600), 'pc': (75, 600), 'pva': (75, 600), 'hips': (75, 600) }
-flowguard_enabled = 1
+flowguard_enabled = 0
 flowguard_max_relief = 40
 flowguard_encoder_mode = 2
 flowguard_encoder_max_motion = 20
@@ -1175,7 +1184,7 @@ pre_load_macro = _MMU_PRE_LOAD
 post_load_macro = _MMU_POST_LOAD
 unload_sequence_macro = _MMU_UNLOAD_SEQUENCE
 load_sequence_macro = _MMU_LOAD_SEQUENCE
-select_tool_macro = _MMU_SELECT_TOOL
+select_tool_macro = _YAMMU_SELECT_TOOL
 
 [gcode_macro _MMU_PURGE]
 description = Simple reference filament purge
@@ -2161,7 +2170,7 @@ gcode =
 	{vars.user_mmu_event_extension} {rawparams}
 	{% endif %}
 
-[gcode_macro _MMU_SELECT_TOOL]
+[gcode_macro _YAMMU_SELECT_TOOL]
 description = "Selects the specified tool/gate on YAMMU"
 variable_select_angle = [0, 180, 0, 180, 0, 180, 0, 180]
 variable_rest_angle = [90, 90, 90, 90, 90, 90, 90, 90]
@@ -2192,51 +2201,17 @@ gcode =
 	
 	{% endif %}
 
-[gcode_macro _MMU_ESPOOLER]
-description = "Controls the YAMMU espooler motors for rewinding or printing filament"
-variable_power_min = 0.925
+[gcode_macro _YAMMU_FORM_TIP]
+description = Standalone macro that mimics Superslicer process
 gcode = 
-	{% set GATE = params.GATE|int %}
-	{% set POWER = params.POWER|float %}
-	{% set OPERATION = params.OPERATION %}
+	{% set OLD_GATE = printer.mmu.gate_selected %}
+	MMU_SYNC_GEAR_MOTOR SYNC=0
+	_YAMMU_SELECT_TOOL GATE=-1
 	
-	{% set PWM_PREFIX = "YAMMU_ESPOOLER_PWM_" %}
-	{% set DIR_PREFIX = "YAMMU_ESPOOLER_DIR_" %}
+	_MMU_FORM_TIP
 	
-	{% if OPERATION not in ("assist", "rewind", "off", "print", "None") %}
-	RESPOND MSG="_MMU_ESPOOLER GATE={GATE} POWER={POWER} OPERATION={OPERATION}(invalid)"
-	RESPOND TYPE=error MSG="Invalid OPERATION parameter. Must be 'assist', 'rewind', 'print' or 'off'."
-	{% else %}
-	RESPOND MSG="_MMU_ESPOOLER GATE={GATE} POWER={POWER} OPERATION={OPERATION}"
-	{% set MOTOR_PIN = PWM_PREFIX ~ (GATE // 4) %}
-	{% set DIRECTION_PIN = DIR_PREFIX ~ (GATE // 4) %}
-	
-	{% if OPERATION == "off" %}
-	RESPOND MSG="SET_PIN PIN={MOTOR_PIN} VALUE=0"
-	SET_PIN PIN={MOTOR_PIN} VALUE=0
-	{% else %}
-	{% if OPERATION == "rewind" %}
-	{% set DIRECTION = GATE % 2 %}
-	{% else %}
-	{% set DIRECTION = (GATE + 1) % 2 %}
-	{% endif %}
-	
-	RESPOND MSG="SET_PIN PIN={DIRECTION_PIN} VALUE={DIRECTION}"
-	SET_PIN PIN={DIRECTION_PIN} VALUE={DIRECTION}
-	
-	{% set VALUE = power_min + POWER * (1.0 - power_min) %}
-	RESPOND MSG="SET_PIN PIN  ={MOTOR_PIN} VALUE={VALUE}"
-	SET_PIN PIN={MOTOR_PIN} VALUE={VALUE}
-	
-	
-	
-	
-	
-	
-	
-	
-	{% endif %}
-	{% endif %}
+	MMU_SYNC_GEAR_MOTOR SYNC=1
+	_YAMMU_SELECT_TOOL GATE={OLD_GATE}
 
 [force_move]
 enable_force_move = True
@@ -2269,6 +2244,10 @@ pid_kp = 26.936
 pid_ki = 2.088
 pid_kd = 86.868
 
+[verify_heater heater_bed]
+heating_gain = 0.5
+hysteresis = 10
+
 [fan_generic fan1]
 pin = gpio17
 
@@ -2297,7 +2276,9 @@ gcode =
 initial_duration = 1
 gcode = 
 	SET_KINEMATIC_POSITION X=150 Y=150 Z=25 SET_HOMED=XYZ
+	MMU_TEST_CONFIG LOG_LEVEL=4
 	MMU_SELECT GATE=0
+	MMU_TEST_MOVE MOTOR=gear MOVE=400 SPEED=400
 =======================
 MMU: Created: led unit0_mmu_exit_leds
 MMU: Created: led unit0_mmu_entry_leds
@@ -2403,15 +2384,60 @@ MMU: Filament sensor mmu_gear_touch is not defined in [mmu_sensors]
 MMU: No [mmu_encoder] definition found in mmu_hardware.cfg. Assuming encoder is not available
 Extruder max_extrude_ratio=0.831503
 mcu 'mcu': Starting serial connect
-mcu 'mcu': got {'oid': 15, 'next_clock': 3894352192, 'value': 31357, '#name': 'analog_in_state', '#sent_time': 535322.250052719, '#receive_time': 535322.266755089}
-mcu 'mcu': got {'oid': 20, 'next_clock': 3894952192, 'value': 31348, '#name': 'analog_in_state', '#sent_time': 535322.3010172, '#receive_time': 535322.316747404}
+webhooks client 140733271102800: New connection
+webhooks client 140733271102800: Client info {'program': 'Moonraker', 'version': 'v0.9.3-131-gb3f9566'}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2407599936, 'value': 32657, '#name': 'analog_in_state', '#sent_time': 1162524.247042692, '#receive_time': 1162524.256363655}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2408199936, 'value': 32658, '#name': 'analog_in_state', '#sent_time': 1162524.297995785, '#receive_time': 1162524.306366563}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2411199936, 'value': 32657, '#name': 'analog_in_state', '#sent_time': 1162524.55287447, '#receive_time': 1162524.556380192}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2411799936, 'value': 32659, '#name': 'analog_in_state', '#sent_time': 1162524.603575951, '#receive_time': 1162524.606382322}
 Loaded MCU 'mcu' 106 commands (v0.12.0-102-g9f41f53c / gcc: (15:8-2019-q3-1+b1) 8.3.1 20190703 (release) [gcc-8-branch revision 273027] binutils: (2.35.2-2+14+b2) 2.35.2)
 MCU 'mcu' config: ADC_MAX=4095 BUS_PINS_i2c0a=gpio0,gpio1 BUS_PINS_i2c0b=gpio4,gpio5 BUS_PINS_i2c0c=gpio8,gpio9 BUS_PINS_i2c0d=gpio12,gpio13 BUS_PINS_i2c0e=gpio16,gpio17 BUS_PINS_i2c0f=gpio20,gpio21 BUS_PINS_i2c0g=gpio24,gpio25 BUS_PINS_i2c0h=gpio28,gpio29 BUS_PINS_i2c1a=gpio2,gpio3 BUS_PINS_i2c1b=gpio6,gpio7 BUS_PINS_i2c1c=gpio10,gpio11 BUS_PINS_i2c1d=gpio14,gpio15 BUS_PINS_i2c1e=gpio18,gpio19 BUS_PINS_i2c1f=gpio22,gpio23 BUS_PINS_i2c1g=gpio26,gpio27 BUS_PINS_spi0a=gpio0,gpio3,gpio2 BUS_PINS_spi0b=gpio4,gpio7,gpio6 BUS_PINS_spi0c=gpio16,gpio19,gpio18 BUS_PINS_spi0d=gpio20,gpio23,gpio22 BUS_PINS_spi1a=gpio8,gpio11,gpio10 BUS_PINS_spi1b=gpio12,gpio15,gpio14 BUS_PINS_spi1c=gpio24,gpio27,gpio26 CLOCK_FREQ=12000000 MCU=rp2040 PWM_MAX=255 STATS_SUMSQ_BASE=256 STEPPER_BOTH_EDGE=1
 mcu 'mmu': Starting serial connect
-mcu 'mcu': got {'oid': 15, 'next_clock': 3897952192, 'value': 31357, '#name': 'analog_in_state', '#sent_time': 535322.518789904, '#receive_time': 535322.566766274}
-mcu 'mcu': got {'oid': 20, 'next_clock': 3898552192, 'value': 31347, '#name': 'analog_in_state', '#sent_time': 535322.518789904, '#receive_time': 535322.616768459}
-mcu 'mcu': got {'oid': 15, 'next_clock': 3901552192, 'value': 31356, '#name': 'analog_in_state', '#sent_time': 535322.518789904, '#receive_time': 535322.866786237}
-mcu 'mcu': got {'oid': 20, 'next_clock': 3902152192, 'value': 31344, '#name': 'analog_in_state', '#sent_time': 535322.518789904, '#receive_time': 535322.916782663}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2414799936, 'value': 32658, '#name': 'analog_in_state', '#sent_time': 1162524.66840434, '#receive_time': 1162524.856410192}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2394449771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.877601599}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2394569771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.887606599}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2394692771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.898418173}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2415399936, 'value': 32659, '#name': 'analog_in_state', '#sent_time': 1162524.66840434, '#receive_time': 1162524.906409618}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2394812771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.908415155}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2394935771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.91841697}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2395055771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.877330118, '#receive_time': 1162524.92841334}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2395178771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.92758671, '#receive_time': 1162524.938416673}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2395298771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.92758671, '#receive_time': 1162524.94841534}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2395421771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.92758671, '#receive_time': 1162524.958612766}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2395541771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.92758671, '#receive_time': 1162524.96860747}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2395664771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.92758671, '#receive_time': 1162524.979418025}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2395784771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.978628951, '#receive_time': 1162524.989418451}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2395907771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.978628951, '#receive_time': 1162524.999420581}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2396027771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.978628951, '#receive_time': 1162525.009419692}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2396150771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162524.978628951, '#receive_time': 1162525.019421729}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2396270771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162524.978628951, '#receive_time': 1162525.029425747}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2396393771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.029703229, '#receive_time': 1162525.039634969}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2396513771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.029703229, '#receive_time': 1162525.049611395}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2396636771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.029703229, '#receive_time': 1162525.060425081}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2396756771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.029703229, '#receive_time': 1162525.07042334}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2396879771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.029703229, '#receive_time': 1162525.080425655}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2396999771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.081198525, '#receive_time': 1162525.090419025}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2397122771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.081198525, '#receive_time': 1162525.100423599}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2397242771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.081198525, '#receive_time': 1162525.110426081}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2397365771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.081198525, '#receive_time': 1162525.120604192}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2397485771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.081198525, '#receive_time': 1162525.130602673}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2397608771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.131616488, '#receive_time': 1162525.141423932}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2397728771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.131616488, '#receive_time': 1162525.151425821}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2418399936, 'value': 32657, '#name': 'analog_in_state', '#sent_time': 1162524.66840434, '#receive_time': 1162525.156420636}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2397851771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.131616488, '#receive_time': 1162525.161427969}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2397971771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.131616488, '#receive_time': 1162525.17142734}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2398094771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.131616488, '#receive_time': 1162525.181430877}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2398214771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.182595118, '#receive_time': 1162525.191424432}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2398337771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.182595118, '#receive_time': 1162525.201609173}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2418999936, 'value': 32656, '#name': 'analog_in_state', '#sent_time': 1162524.66840434, '#receive_time': 1162525.206423784}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2398457771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.182595118, '#receive_time': 1162525.211601062}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2398580771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.182595118, '#receive_time': 1162525.222431321}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2398700771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.182595118, '#receive_time': 1162525.232431358}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2398823771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.233603525, '#receive_time': 1162525.242429432}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2398943771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.233603525, '#receive_time': 1162525.252431562}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2399066771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.233603525, '#receive_time': 1162525.262436358}
+mcu 'mmu': got {'oid': 6, 'next_clock': 2399186771, 'count': 1, 'count_clock': 96519516, '#name': 'counter_state', '#sent_time': 1162525.233603525, '#receive_time': 1162525.272433414}
+mcu 'mmu': got {'oid': 5, 'next_clock': 2399309771, 'count': 147231, 'count_clock': 2140589771, '#name': 'counter_state', '#sent_time': 1162525.233603525, '#receive_time': 1162525.282609173}
 Loaded MCU 'mmu' 132 commands (v0.13.0-463-g2bd0acb6 / gcc: (15:14.2.rel1-1) 14.2.1 20241119 binutils: (2.44-3+23+b2) 2.44)
 MCU 'mmu' config: ADC_MAX=4095 BUS_PINS_i2c0a=gpio0,gpio1 BUS_PINS_i2c0b=gpio4,gpio5 BUS_PINS_i2c0c=gpio8,gpio9 BUS_PINS_i2c0d=gpio12,gpio13 BUS_PINS_i2c0e=gpio16,gpio17 BUS_PINS_i2c0f=gpio20,gpio21 BUS_PINS_i2c0g=gpio24,gpio25 BUS_PINS_i2c0h=gpio28,gpio29 BUS_PINS_i2c1a=gpio2,gpio3 BUS_PINS_i2c1b=gpio6,gpio7 BUS_PINS_i2c1c=gpio10,gpio11 BUS_PINS_i2c1d=gpio14,gpio15 BUS_PINS_i2c1e=gpio18,gpio19 BUS_PINS_i2c1f=gpio22,gpio23 BUS_PINS_i2c1g=gpio26,gpio27 BUS_PINS_spi0_gpio0_gpio3_gpio2=gpio0,gpio3,gpio2 BUS_PINS_spi0_gpio16_gpio19_gpio18=gpio16,gpio19,gpio18 BUS_PINS_spi0_gpio20_gpio23_gpio22=gpio20,gpio23,gpio22 BUS_PINS_spi0_gpio4_gpio3_gpio2=gpio4,gpio3,gpio2 BUS_PINS_spi0_gpio4_gpio7_gpio6=gpio4,gpio7,gpio6 BUS_PINS_spi0a=gpio0,gpio3,gpio2 BUS_PINS_spi0b=gpio4,gpio7,gpio6 BUS_PINS_spi0c=gpio16,gpio19,gpio18 BUS_PINS_spi0d=gpio20,gpio23,gpio22 BUS_PINS_spi1_gpio12_gpio11_gpio10=gpio12,gpio11,gpio10 BUS_PINS_spi1_gpio12_gpio15_gpio14=gpio12,gpio15,gpio14 BUS_PINS_spi1_gpio24_gpio27_gpio26=gpio24,gpio27,gpio26 BUS_PINS_spi1_gpio8_gpio11_gpio10=gpio8,gpio11,gpio10 BUS_PINS_spi1a=gpio8,gpio11,gpio10 BUS_PINS_spi1b=gpio12,gpio15,gpio14 BUS_PINS_spi1c=gpio24,gpio27,gpio26 CLOCK_FREQ=12000000 MCU=rp2040 PWM_MAX=255 STATS_SUMSQ_BASE=256 STEPPER_OPTIMIZED_EDGE=2 STEPPER_STEP_BOTH_EDGE=1
 Configured MCU 'mcu' (1024 moves)
@@ -2422,6 +2448,11 @@ Starting heater checks for extruder
 Incorrect number of gates specified in mmu_state_tool_to_gate_map
 Incorrect number of gates specified with mmu_state_gate_status</span>
 Happy Hare MacroSelector: Gate 0
+Stats 1162525.5: gcodein=0 mcu: mcu_awake=0.003 mcu_task_avg=0.000008 mcu_task_stddev=0.000008 bytes_write=1713 bytes_read=5142 bytes_retransmit=9 bytes_invalid=0 send_seq=160 receive_seq=160 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12009482 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1215 bytes_read=6061 bytes_retransmit=0 bytes_invalid=0 send_seq=122 receive_seq=122 retransmit_seq=0 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=29 upcoming_bytes=0 freq=12022990 adj=12016379 heater_bed: target=0 temp=0.0 pwm=0.000 print_time=57110.121 buffer_time=0.219 print_stall=0 extruder: target=0 temp=0.0 pwm=0.000 sysload=0.05 cputime=0.699 memavail=294368
+webhooks: registering remote method 'shutdown_machine' for connection id: 140733271102800
+webhooks: registering remote method 'reboot_machine' for connection id: 140733271102800
+webhooks: registering remote method 'pause_job_queue' for connection id: 140733271102800
+webhooks: registering remote method 'start_job_queue' for connection id: 140733271102800
 SET_KINEMATIC_POSITION pos=150.000,150.000,25.000 set_homed=xyz clear_homed=
 FILAMENT MOVEMENT SPEEDS:
 gear_from_spool_speed = 600.0
@@ -2433,11 +2464,11 @@ gear_from_buffer_accel = 100.0
 gear_short_move_speed = 200.0
 gear_short_move_accel = 100.0
 gear_short_move_threshold = 70.0
-gear_homing_speed = 100.0
-extruder_homing_speed = 100.0
-extruder_load_speed = 100.0
-extruder_unload_speed = 100.0
-extruder_sync_load_speed = 100.0
+gear_homing_speed = 250.0
+extruder_homing_speed = 15.0
+extruder_load_speed = 20.0
+extruder_unload_speed = 200.0
+extruder_sync_load_speed = 20.0
 extruder_sync_unload_speed = 200.0
 extruder_accel = 400.0
 
@@ -2457,7 +2488,7 @@ sync_feedback_extrude_threshold = 5.0
 sync_feedback_debug_log = 0
 
 FLOWGUARD:
-flowguard_enabled = 1
+flowguard_enabled = 0
 flowguard_max_relief = 40.0
 
 LOADING/UNLOADING:
@@ -2468,14 +2499,14 @@ gate_parking_distance = 23.0
 gate_preload_homing_max = 300.0
 gate_preload_parking_distance = -10.0
 gate_autoload = 1
-gate_final_eject_distance = 0.0
+gate_final_eject_distance = 600.0
 bypass_autoload = 1
 extruder_force_homing = 0
 extruder_homing_endstop = extruder
 extruder_homing_max = 1000.0
 toolhead_extruder_to_nozzle = 72.0
-toolhead_sensor_to_nozzle = 62.0
-toolhead_homing_max = 240.0
+toolhead_sensor_to_nozzle = 12.0
+toolhead_homing_max = 320.0
 toolhead_entry_to_extruder = 30.0
 toolhead_residual_filament = 0.0
 toolhead_ooze_reduction = 0.0
@@ -2487,7 +2518,7 @@ gcode_load_sequence = 0
 gcode_unload_sequence = 0
 
 TIP FORMING/CUTTING:
-form_tip_macro = _MMU_FORM_TIP
+form_tip_macro = _YAMMU_FORM_TIP
 force_form_tip_standalone = 1
 
 PURGING:
@@ -2517,218 +2548,64 @@ show_error_dialog = 1
 
 CALIBRATION (mmu_vars.cfg):
 mmu_calibration_bowden_length = 742.8
-    TRACE: Running macro: _MMU_SELECT_TOOL GATE=0
+    TRACE: Running macro: _YAMMU_SELECT_TOOL GATE=0
 Unit : ------- 0 -------   ------- 1 -------   ----- 2 -----
 Gate : | 0 | 1 | 2 | 3 |   | 4 | 5 | 6 | 7 |   | 8 | 9 | 10|
 Tools: |T0 |T1 |T2 |T3 |   |T4 |T5 |T6 |T7 |   |T8 |T9 |T10|
 Avail: | ? | ? | ? | ? |   | ? | ? | ? | ? |   | ? | ? | ? |
 Selct: |\ /|------------   -----------------   ------------- T0
 [T0] > (g) .......... (e) .. [Ex .. (t) .. Nz] <b><span style="color:#87CEEB">UNLOADED</span></b> <b>0.0mm</b>
-MMU gear stepper will be synced with extruder whenever filament is in extruder
-<span style="color:#FF69B4">Will temporarily sync, but filament position does not indicate in extruder!
-Use 'MMU_RECOVER' to correct the filament position.</span>
-Stats 535323.4: gcodein=229 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1663 bytes_read=5046 bytes_retransmit=9 bytes_invalid=0 send_seq=140 receive_seq=140 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12001048 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1191 bytes_read=5215 bytes_retransmit=9 bytes_invalid=0 send_seq=123 receive_seq=123 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=29 upcoming_bytes=0 freq=12020725 adj=12022753 heater_bed: target=0 temp=0.0 pwm=0.000 print_time=8557.623 buffer_time=0.250 print_stall=0 extruder: target=0 temp=0.0 pwm=0.000 sysload=0.05 cputime=0.936 memavail=390032
-      STEPPER: resync(unsynced --> extruder+gear)
-      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000202
-      STEPPER: sync(mode=3 extruder+gear)
-      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state
-      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state
-MmuSyncFeedbackManager: Synced MMU to extruder
-      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state
-      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state
-Exiting (print time 8559.563s)
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0209 de=0.0000 raw_speed=0.000 selected_speed=0.000 scale=1.000 moving=0 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=0.0000 raw_speed=0.000 selected_speed=0.000 scale=1.000 moving=0 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SPEED: source=sync linear_speed=17.423 requested_rpm=290.2 clamped_rpm=290.2 pwm=0.8573 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_DIR_0 value=1.0000 time=8558.061 called=safe_set_direction
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8573 time=8558.061 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8573 time=8558.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8558.082 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8558.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8558.102 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8558.361
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.122 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.142 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.162 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.183 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.661
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0205 de=1.0489 raw_speed=51.045 selected_speed=51.045 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8558.203 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8558.761
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8708 time=8558.224 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8708 time=8558.861
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.243 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.961
-      STEPPER: BLDC_SPEED: source=sync linear_speed=52.068 requested_rpm=867.1 clamped_rpm=867.1 pwm=0.8717 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.263 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.061
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8714 time=8558.283 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8714 time=8559.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.303 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8559.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.323 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.361
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.344 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8559.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.364 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8559.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.384 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8559.661
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0203 de=1.0489 raw_speed=51.668 selected_speed=51.668 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.404 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.424 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-SET_KINEMATIC_POSITION pos=150.000,150.000,25.000 set_homed=xyz clear_homed=
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8690 time=8558.445 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8690 time=8559.761
-      STEPPER: BLDC_SPEED: source=sync linear_speed=52.082 requested_rpm=867.3 clamped_rpm=867.3 pwm=0.8717 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.465 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.861
-Stats 535324.4: gcodein=229 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=2096 bytes_read=5513 bytes_retransmit=9 bytes_invalid=0 send_seq=164 receive_seq=164 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=8 upcoming_bytes=0 freq=12002582 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1299 bytes_read=5271 bytes_retransmit=9 bytes_invalid=0 send_seq=130 receive_seq=130 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=112 freq=12006921 adj=12019021 heater_bed: target=0 temp=23.8 pwm=0.000 print_time=8559.563 buffer_time=1.189 print_stall=0 extruder: target=0 temp=24.0 pwm=0.000 sysload=0.05 cputime=0.948 memavail=389440
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8712 time=8558.485 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8712 time=8559.961
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.505 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8560.061
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.525 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8560.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.545 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.565 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8560.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.586 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8560.361
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0203 de=1.0490 raw_speed=51.799 selected_speed=51.799 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.606 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.626 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8560.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.646 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8560.561
-      STEPPER: BLDC_SPEED: source=sync linear_speed=51.797 requested_rpm=862.6 clamped_rpm=862.6 pwm=0.8716 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.667 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8558.687 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8560.661
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.707 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8560.761
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.727 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.747 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8560.861
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.767 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8560.961
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.788 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8561.061
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=0.9324 raw_speed=46.329 selected_speed=46.329 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.808 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8561.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.828 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8561.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8558.848 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8561.361
-      STEPPER: BLDC_SPEED: source=sync linear_speed=46.194 requested_rpm=769.3 clamped_rpm=769.3 pwm=0.8692 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.869 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8561.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.889 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8561.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8558.909 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8558.929 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8561.661
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.949 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8561.761
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8558.970 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8558.990 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8561.861
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=1.0489 raw_speed=52.105 selected_speed=52.105 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.010 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8561.961
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.030 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8559.050 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8562.061
-      STEPPER: BLDC_SPEED: source=sync linear_speed=52.147 requested_rpm=868.4 clamped_rpm=868.4 pwm=0.8717 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.070 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8562.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8559.091 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8562.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8559.111 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8562.361
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.131 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8562.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8716 time=8559.151 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8559.172 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8562.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8559.192 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8562.661
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=1.0490 raw_speed=52.063 selected_speed=52.063 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.212 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8562.761
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8559.232 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8562.861
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.252 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8562.961
-    TRACE: Running macro: _MMU_SELECT_TOOL GATE=0
+  DEBUG: Moving 'gear' motor 400.0mm...
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000178
+      STEPPER: resync(unsynced --> unsynced/gear)
+Stats 1162526.5: gcodein=0 mcu: mcu_awake=0.003 mcu_task_avg=0.000008 mcu_task_stddev=0.000008 bytes_write=1719 bytes_read=5158 bytes_retransmit=9 bytes_invalid=0 send_seq=161 receive_seq=161 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12001419 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1255 bytes_read=6082 bytes_retransmit=0 bytes_invalid=0 send_seq=124 receive_seq=124 retransmit_seq=0 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12004875 adj=12012773 heater_bed: target=0 temp=0.0 pwm=0.000 print_time=57111.124 buffer_time=0.223 print_stall=0 extruder: target=0 temp=0.0 pwm=0.000 sysload=0.05 cputime=0.710 memavail=295472
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: _quiesce_align_get_tcut(full=True, wait=True) Elapsed:0.603385
+      STEPPER: GEAR MOVE: dist=400.0, speed=400.0, accel=100.0, wait=True
+      STEPPER: BLDC_SET_SPEED: requested speed=400.000 mm/s source=move unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=move speed=400.000 requested_rpm=6661.3 clamped_rpm=6000.0 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_DIR_0 applied=1.0000 time=57111.576 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=1.0000 applied=1.0000 time=57111.676 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_TACH: freq=0.000 rpm=0.0 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=6000.0 base_pwm=1.0000 correction_pwm=0.0000 applied_pwm=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=897.4 base_pwm=1.0000 correction_pwm=0.0000 applied_pwm=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+Stats 1162527.5: gcodein=0 mcu: mcu_awake=0.003 mcu_task_avg=0.000008 mcu_task_stddev=0.000008 bytes_write=1725 bytes_read=5264 bytes_retransmit=9 bytes_invalid=0 send_seq=162 receive_seq=162 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000723 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1282 bytes_read=7657 bytes_retransmit=0 bytes_invalid=0 send_seq=126 receive_seq=126 retransmit_seq=0 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12001338 adj=11999334 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=57111.426 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.2 pwm=0.000 sysload=0.05 cputime=0.723 memavail=295392
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=961.3 base_pwm=1.0000 correction_pwm=0.0000 applied_pwm=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1511.621 rpm=5038.7 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=1001.9 base_pwm=1.0000 correction_pwm=0.0000 applied_pwm=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=1.0000 correction_pwm=0.0000 applied_pwm=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=57112.577 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'gear' moved 400.0mm, encoder measured 0.0mm (delta 400.0mm). Pos: @400.0, (0.0mm)
+Moved 400.0mm
+      STEPPER: resync(unsynced/gear --> unsynced)
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=-4936.4 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_TACH: freq=1580.795 rpm=5269.3 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=sync_inactive reason=sync_inactive error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 applied_pwm=0.0000 unit=mmu_gear_bldc unit1
+      STEPPER: _quiesce_align_get_tcut(full=True, wait=True) Elapsed:0.301829
+<span style="color:#C0C0C0">(\_/)</span>
+<span style="color:#C0C0C0">( </span>*,*<span style="color:#C0C0C0">)</span>
+<span style="color:#C0C0C0">(")_(")</span> <b><span style="color:#FF69B4">H</span><span style="color:#90EE90">a</span><span style="color:#87CEEB">p</span><span style="color:#FF69B4">p</span><span style="color:#90EE90">y</span> <span style="color:#87CEEB">H</span><span style="color:#FF69B4">a</span><span style="color:#90EE90">r</span><span style="color:#87CEEB">e</span> <span style="color:#C0C0C0">v3.4.2</span> <span style="color:#FF69B4">R</span><span style="color:#90EE90">e</span><span style="color:#87CEEB">a</span><span style="color:#FF69B4">d</span><span style="color:#90EE90">y</span><span style="color:#C0C0C0">...</span></b>
+  DEBUG: Job State: READY -> INITIALIZED (MMU State: Encoder: n/a, Synced: False, Paused temp: None, Resume to state: ready, Position saved for: , pause_resume: False, Idle timeout: 600.00s)
+    TRACE: Running macro: _MMU_PRINT_STATE_CHANGED STATE='initialized' OLD_STATE='ready'
 Unit : ------- 0 -------   ------- 1 -------   ----- 2 -----
 Gate : | 0 | 1 | 2 | 3 |   | 4 | 5 | 6 | 7 |   | 8 | 9 | 10|
 Tools: |T0 |T1 |T2 |T3 |   |T4 |T5 |T6 |T7 |   |T8 |T9 |T10|
 Avail: | ? | ? | ? | ? |   | ? | ? | ? | ? |   | ? | ? | ? |
 Selct: |\ /|------------   -----------------   ------------- T0
-[T0] > (*) .......... (*) .. [Ex .. (*) .. Nz] <b><span style="color:#87CEEB">UNLOADED</span></b> <b>0.0mm</b>
-      STEPPER: BLDC_SPEED: source=sync linear_speed=51.069 requested_rpm=850.5 clamped_rpm=850.5 pwm=0.8713 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8559.272 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8713 time=8563.061
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8559.293 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8563.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.313 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8563.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.333 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8559.353 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8563.361
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8559.373 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8563.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8559.394 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=0.9324 raw_speed=46.306 selected_speed=46.306 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8559.414 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8693 time=8563.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8714 time=8559.434 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8714 time=8563.661
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.454 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8563.761
-Stats 535325.4: gcodein=229 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=2189 bytes_read=5685 bytes_retransmit=9 bytes_invalid=0 send_seq=168 receive_seq=168 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12001838 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1435 bytes_read=5337 bytes_retransmit=9 bytes_invalid=0 send_seq=141 receive_seq=141 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=344 freq=12003098 adj=11995399 heater_bed: target=0 temp=23.9 pwm=0.000 print_time=8560.265 buffer_time=0.890 print_stall=0 extruder: target=0 temp=24.0 pwm=0.000 sysload=0.05 cputime=0.959 memavail=391216
-      STEPPER: BLDC_SPEED: source=sync linear_speed=50.820 requested_rpm=846.3 clamped_rpm=846.3 pwm=0.8712 dir=forward unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8712 time=8559.475 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8712 time=8563.861
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8559.495 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8691 time=8563.961
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.515 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8564.061
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.535 called=set_target
-      STEPPER: BLDC_SET_PIN: discard.
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8559.556 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8564.161
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8718 time=8559.576 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8718 time=8564.261
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8559.596 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8715 time=8564.361
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0202 de=0.9324 raw_speed=46.221 selected_speed=46.221 scale=1.000 moving=1 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8559.617 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8692 time=8564.461
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8559.637 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8717 time=8564.561
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8645 time=8559.657 called=set_target
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.8645 time=8564.661
-      STEPPER: BLDC_SEND_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.0000 time=0.000 called=stop
-      STEPPER: BLDC_SET_PIN: pin=YAMMU_ESPOOLER_PWM_0 value=0.0000 time=8564.761
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=0.0000 raw_speed=0.000 selected_speed=0.000 scale=1.000 moving=0 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0201 de=0.0000 raw_speed=0.000 selected_speed=0.000 scale=1.000 moving=0 unit=mmu_gear_bldc unit0
-      STEPPER: BLDC_SYNC_SAMPLE: source=past_position dt=0.0202 de=0.0000 raw_speed=0.000 selected_speed=0.000 scale=1.000 moving=0 unit=mmu_gear_bldc unit0
-  DEBUG: Klipper disconnected!
+[T0] > (g) .......... (e) .. [Ex .. (t) .. Nz] <b><span style="color:#87CEEB">UNLOADED</span></b> <b>400.0mm</b>
+<span style="color:#FF69B4">Warning: Calibration steps are not complete:
+Required:
+- Use MMU_CALIBRATE_GEAR (with appropriate gate selected) to calibrate gear rotation_distance on gates: 8,9,10</span>
+    TRACE: Disabled FlowGuard and runout detection

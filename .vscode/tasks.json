@@ -52,7 +52,7 @@
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
-                "ssh klippy-test pgrep -f klippy-env/bin/python && kill `pgrep -f klippy-env/bin/python`;",
+                "ssh klippy-test pgrep -f klippy-env/bin/python && kill ``pgrep -f klippy-env/bin/python``;",
                 "}"
             ],
             "problemMatcher": [],
@@ -70,6 +70,23 @@
                 "scp C:/GIT/YAMMU/Firmware/Happy-Hare/.github/skills/run-test-rig/startup.gcode klippy-test:/tmp/startup.gcode;",
                 ". C:/GIT/YAMMU/Firmware/Sync-TestRig.ps1 -Export;",
                 "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -i /tmp/startup.gcode -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
+                "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "FIRMWARE_RESTART on Test Rig",
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "ssh klippy-test rm /home/user/printer_data/logs/klippy.log;",
+                "ssh klippy-test 'echo FIRMWARE_RESTART > /tmp/restart.gcode';",
+                "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -i /tmp/restart.gcode -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
                 "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
                 "}"
             ],

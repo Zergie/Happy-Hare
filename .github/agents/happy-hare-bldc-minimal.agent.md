@@ -20,8 +20,8 @@ You are a specialist for integrating BLDC motor behavior into the Happy Hare add
 - Ensure this BLDC configuration works as a target acceptance case:
 ```ini
 [mmu_gear_bldc]
-dir_pin: mmu:YAMMU_ESPOOLER_DIR_0
-pwm_pin: mmu:YAMMU_ESPOOLER_PWM_0
+dir_pin: mmu:YAMMU_BLDC_DIR_0
+pwm_pin: mmu:YAMMU_BLDC_PWM_0
 pwm_min: 0.85
 pwm_max: 1.00
 hardware_pwm: True   # See klipper doc
