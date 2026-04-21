@@ -337,8 +337,8 @@ class MmuGearBldc:
         self.tachometer_stale_time = config.getfloat('tachometer_stale_time', self.tachometer_sample_time * 3., above=0.)
         self.tachometer = None
         self.control_enabled = config.getboolean('tachometer_control_enabled', False)
-        self.control_kp = config.getfloat('tachometer_control_kp', 1.0, minval=0.)
-        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 0.05, minval=0., maxval=1.)
+        self.control_kp = config.getfloat('tachometer_control_kp', 25.0, minval=0.)
+        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 1.0, minval=0., maxval=1.)
         self.control_correction_pwm = 0.
         self.control_enable_after_print_time = 0.
         self.control_reason = 'disabled'
@@ -456,8 +456,6 @@ class MmuGearBldc:
             return False, 'disabled'
         if self.tachometer is None:
             return False, 'no_tachometer'
-        if not self.sync_active:
-            return False, 'sync_inactive'
         if self.commanded_source == 'stop' or self.commanded_rpm <= self.ZERO_EPSILON:
             return False, 'stopped'
         if self._get_current_print_time() < self.control_enable_after_print_time:
