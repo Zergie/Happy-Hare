@@ -15,7 +15,6 @@ from .. import output_pin
 from .. import mmu_espooler
 from .. import pulse_counter
 
-
 class SyncMonitorBase:
     def activate(self, bldc):
         raise NotImplementedError()
@@ -292,12 +291,13 @@ class ProcessMoveSyncMonitor(SyncMonitorBase):
 
 
 class MmuGearBldc:
+    CONTROL_DEADBAND_RPM = 50.
+    CONTROL_LOG_INTERVAL = 0.2
+    CONTROL_MIN_RPM = 150.
+    PID_PARAM_BASE = 255.
     SYNC_SPEED_LOG_INTERVAL = 0.2
     TACH_LOG_INTERVAL = 0.5
-    CONTROL_LOG_INTERVAL = 0.2
     ZERO_EPSILON = 1e-6
-    CONTROL_DEADBAND_RPM = 100.
-    CONTROL_MIN_RPM = 150.
 
     def __init__(self, config, mmu, first_gate=0, num_gates=1):
         self.config = config
@@ -337,9 +337,11 @@ class MmuGearBldc:
         self.tachometer_stale_time = config.getfloat('tachometer_stale_time', self.tachometer_sample_time * 3., above=0.)
         self.tachometer = None
         self.control_enabled = config.getboolean('tachometer_control_enabled', False)
-        self.control_kp = config.getfloat('tachometer_control_kp', 25.0, minval=0.)
-        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 1.0, minval=0., maxval=1.)
+        self.control_kp = config.getfloat('tachometer_control_kp', 20.0, minval=0.) / self.PID_PARAM_BASE
+        self.control_ki = config.getfloat('tachometer_control_ki', 1125.0, minval=0.) / self.PID_PARAM_BASE
+        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 0.15, minval=0., maxval=1.)
         self.control_correction_pwm = 0.
+        self.integral_correction_pwm = 0.
         self.control_enable_after_print_time = 0.
         self.control_reason = 'disabled'
         self.last_tach_error_rpm = 0.
@@ -473,11 +475,14 @@ class MmuGearBldc:
             or eventtime - self.last_control_log_eventtime >= self.CONTROL_LOG_INTERVAL
         if not reason_changed and not time_elapsed:
             return
+        if not reason_changed and self.control_reason == 'disabled':
+            return
         self.last_control_log_eventtime = eventtime
         self.last_control_log_reason = self.control_reason
+        print_time = self.mcu_pwm_pin.get_mcu().estimated_print_time(eventtime)
         self.mmu.log_stepper(
-            "BLDC_CONTROL: source=%s reason=%s error_rpm=%.1f base_pwm=%.4f correction_pwm=%.4f applied_pwm=%.4f unit=%s"
-            % (source, self.control_reason, self.last_tach_error_rpm, base_pwm, self.control_correction_pwm, applied_pwm, self.section_name)
+            "BLDC_CONTROL: source=%s reason=%s error_rpm=%.1f base_pwm=%.4f correction_pwm=%.4f integral_pwm=%.4f applied_pwm=%.4f time=%.3f unit=%s"
+            % (source, self.control_reason, self.last_tach_error_rpm, base_pwm, self.control_correction_pwm, self.integral_correction_pwm, applied_pwm, print_time, self.section_name)
         )
 
     def _apply_control(self, pwm, source):
@@ -498,10 +503,17 @@ class MmuGearBldc:
         if self._tach_last_count is None:
             self._tach_last_count = count
             self._tach_last_count_time = count_time
+            self.last_tach_eventtime = time
             return
         delta_count = count - self._tach_last_count
         delta_time = count_time - self._tach_last_count_time
         frequency = delta_count / delta_time if delta_time > 0. else 0.
+        elapsed_event_time = 0.
+        if self.last_tach_eventtime is not None:
+            elapsed_event_time = max(0., time - self.last_tach_eventtime)
+        control_dt = delta_time if delta_time > 0. else elapsed_event_time
+        if control_dt <= 0.:
+            control_dt = self.tachometer_sample_time
         self._tach_last_count = count
         self._tach_last_count_time = count_time
         self.last_tach_eventtime = time
@@ -509,16 +521,24 @@ class MmuGearBldc:
         self.last_tach_rpm = frequency * 30. / self.tachometer_ppr
         eligible, reason = self._is_control_eligible()
         if not eligible:
+            self.integral_correction_pwm = 0.
             self._set_control_state(reason, 0., self.commanded_rpm - self.last_tach_rpm)
         else:
             error_rpm = self.commanded_rpm - self.last_tach_rpm
             if abs(error_rpm) <= self.CONTROL_DEADBAND_RPM:
-                self._set_control_state('deadband', 0., error_rpm)
+                self._set_control_state('deadband', self.control_correction_pwm, error_rpm)
             else:
                 pwm_span = self.pwm_max - self.pwm_min
-                correction_pwm = self.control_kp * (error_rpm / self.max_rpm) * pwm_span
-                correction_pwm = max(-self.control_max_delta_pwm, min(self.control_max_delta_pwm, correction_pwm))
-                self._set_control_state('active', correction_pwm, error_rpm)
+                p_correction = self.control_kp * (error_rpm / self.max_rpm) * pwm_span
+                p_correction = max(-self.control_max_delta_pwm, min(self.control_max_delta_pwm, p_correction))
+                i_increment = self.control_ki * (error_rpm / self.max_rpm) * pwm_span * control_dt
+                self.integral_correction_pwm = max(-self.control_max_delta_pwm, min(self.control_max_delta_pwm, self.integral_correction_pwm + i_increment))
+                total_correction = max(-self.control_max_delta_pwm, min(self.control_max_delta_pwm, p_correction + self.integral_correction_pwm))
+                self._set_control_state('active', total_correction, error_rpm)
+                base_pwm = self._rpm_to_pwm(self.commanded_rpm)
+                new_effective_pwm = min(self.pwm_max, max(self.pwm_min, base_pwm + total_correction))
+                self.last_effective_pwm = new_effective_pwm
+                self._send_pin(self.mcu_pwm_pin, new_effective_pwm)
         self._log_tachometer()
 
     def _has_fresh_tachometer(self):
@@ -537,9 +557,12 @@ class MmuGearBldc:
         self.last_tach_log_eventtime = eventtime
         if self.commanded_rpm < 100 and self.last_tach_rpm < 100:
             return
+        tach_print_time = self.last_tach_eventtime
+        if tach_print_time is None:
+            tach_print_time = self.mcu_pwm_pin.get_mcu().estimated_print_time(eventtime)
         self.mmu.log_stepper(
-            "BLDC_TACH: freq=%.3f rpm=%.1f unit=%s"
-            % (self.last_tach_freq, self.last_tach_rpm, self.section_name)
+            "BLDC_TACH: freq=%.3f rpm=%.1f time=%.3f unit=%s"
+            % (self.last_tach_freq, self.last_tach_rpm, tach_print_time, self.section_name)
         )
 
     def supports_gate(self, gate):
@@ -715,6 +738,7 @@ class MmuGearBldc:
         self.commanded_linear_speed = 0.
         self.control_enable_after_print_time = 0.
         self.last_effective_pwm = 0.
+        self.integral_correction_pwm = 0.
         self._set_control_state('stopped', 0., 0.)
         if abs(self.last_pwm) > self.ZERO_EPSILON:
             self._send_pin(self.mcu_pwm_pin, 0., print_time)
@@ -756,6 +780,7 @@ class MmuGearBldc:
             'control_enabled': self.control_enabled,
             'control_reason': self.control_reason,
             'control_correction_pwm': self.control_correction_pwm,
+            'integral_correction_pwm': self.integral_correction_pwm,
             'effective_pwm': self.last_effective_pwm,
         }
 
