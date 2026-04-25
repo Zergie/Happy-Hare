@@ -33,6 +33,19 @@
         },
         {
             "label": "Start on Test Rig",
+            // "type": "process",
+            // "command": "pwsh",
+            // "args": [
+            //     "-NoProfile",
+            //     "-ExecutionPolicy",
+            //     "Bypass",
+            //     "-Command",
+            //     "{",
+            //     ". C:/GIT/YAMMU/Firmware/Sync-TestRig.ps1 -Export;",
+            //     "ssh klippy-test rm /home/user/printer_data/logs/klippy.log;",
+            //     "ssh klippy-test /home/user/klippy-env/bin/python /home/user/klipper/klippy/klippy.py /home/user/printer_data/config/printer.cfg -I /home/user/printer_data/comms/klippy.serial -l /home/user/printer_data/logs/klippy.log -a /home/user/printer_data/comms/klippy.sock;",
+            //     "}",
+            // ],
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -50,10 +63,10 @@
         {
             "label": "Stop on Test Rig",
             "type": "shell",
-            "command": [
-                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
-                "ssh klippy-test pgrep -f klippy-env/bin/python && kill ``pgrep -f klippy-env/bin/python``;",
-                "}"
+            "command": "ssh",
+            "args": [
+                "klippy-test",
+                "pgrep -f klippy-env/bin/python && kill `pgrep -f klippy-env/bin/python`"
             ],
             "problemMatcher": [],
             "group": {
@@ -103,6 +116,23 @@
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
                 "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
                 "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "Plot PWM Graph",
+            "type": "process",
+            "command": "c:/GIT/YAMMU/Firmware/Happy-Hare/.venv/Scripts/python.exe",
+            "args": [
+                "C:/git/YAMMU/Firmware/Happy-Hare/utils/plot_bldc_pwm.py",
+                "--input",
+                "C:/git/YAMMU/Firmware/Happy-Hare/.github/skills/run-test-rig/klippy.log",
+                "--output",
+                "C:/git/YAMMU/Firmware/Happy-Hare/.github/skills/run-test-rig/plot_bldc_pwm.png",
             ],
             "problemMatcher": [],
             "group": {
