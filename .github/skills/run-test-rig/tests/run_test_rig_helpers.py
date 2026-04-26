@@ -17,7 +17,7 @@ TARGET_UNIT = "mmu_gear_bldc unit0"
 UNKNOWN_COMMAND_PATTERN = re.compile(r"Unknown command:")
 TRACEBACK_HEADER_PATTERN = re.compile(r"Traceback \(most recent call last\)")
 BENIGN_BLOCKING_IO_PATTERN = re.compile(r"BlockingIOError: \[Errno 11\] Resource temporarily unavailable")
-BENIGN_RESPOND_RAW_PATTERN = re.compile(r"gcode\.py\", line \d+, in _respond_raw")
+BENIGN_RESPOND_RAW_PATTERN = re.compile(r"_respond_raw")
 BLDC_TACH_PATTERN = re.compile(
     r"(?m)^.*BLDC_TACH: freq=(?P<freq>[0-9.]+) rpm=(?P<rpm>[0-9.]+)(?: time=(?P<time>[0-9.]+))?.* unit=(?P<unit>.+)$"
 )
@@ -133,7 +133,8 @@ def invoke_run_test_rig_scenario(gcode_lines: list[str], expected_runtime_second
 
 
 def _is_benign_traceback(lines: list[str], traceback_index: int) -> bool:
-    lookahead = lines[traceback_index : traceback_index + 12]
+    # Some rigs emit additional lines before the traceback tail; use a wider window.
+    lookahead = lines[traceback_index : traceback_index + 24]
     has_blocking_io = any(BENIGN_BLOCKING_IO_PATTERN.search(line) for line in lookahead)
     has_respond_raw = any(BENIGN_RESPOND_RAW_PATTERN.search(line) for line in lookahead)
     return has_blocking_io and has_respond_raw

@@ -17,6 +17,7 @@ user-invocable: true
 - Small set of targeted clarifying questions via `vscode_askQuestions`.
 - Updated plan reflecting user answers.
 - Brief residual-risk summary.
+- Caveman-compressed response text (default `full` intensity unless user sets level).
 
 ## Procedure
 1. Read current plan file from workspace.
@@ -37,6 +38,10 @@ user-invocable: true
 - No hard question cap. If 10 high-impact questions exist, ask all 10.
 - Use fixed options when possible.
 - Questions must directly change plan text.
+- After findings, explain each question in detail BEFORE asking it:
+	- why question matters
+	- risk if unanswered
+	- exact plan section that will change based on answer
 6. Update plan file based on answers.
 - Preserve style/voice unless user asked to rewrite style.
 - Apply minimal delta edits.
@@ -52,7 +57,8 @@ user-invocable: true
 - If stop/complete criteria are vague, convert to measurable windowed checks.
 - If constraints conflict (tasks/tools/scope), prefer user hard constraints and mark residual risk.
 - If no material findings, state no findings and list residual testing gaps.
-- If user runs caveman mode, match requested caveman intensity for review/update text.
+- Use caveman-compressed output by default at `full` intensity.
+- If user requests level (`lite|full|ultra|wenyan-*`), match requested intensity.
 - After clarifications resolved, auto-patch plan file by default unless user explicitly asks for review-only.
 
 ## Quality Gates
@@ -65,9 +71,15 @@ user-invocable: true
 
 ## Output Format
 1. Findings first (severity-ordered).
-2. Questions asked (or state none needed).
-3. Plan updates applied.
-4. Residual risks.
+2. Question explanations first (or state none needed).
+- For each pending question, include: rationale, impact, and expected plan delta.
+3. Questions asked.
+4. Plan updates applied.
+5. Residual risks.
+6. Compression style for all sections:
+- Short fragments, no filler/hedging.
+- Keep technical terms exact.
+- Prefer one-line bullets per finding/question when possible.
 
 ## Example Triggers
 - /review-plans untitled:plan-x.prompt.md
@@ -78,4 +90,4 @@ user-invocable: true
 - Use `vscode_askQuestions` for clarifications instead of open-ended chat prompts when possible.
 - Keep edits minimal and local to plan file.
 - Do not expand scope beyond user-requested workflow unless needed for correctness.
-- Default tone: concise normal. Switch to caveman terse when active/requested.
+- Default tone: caveman `full`.

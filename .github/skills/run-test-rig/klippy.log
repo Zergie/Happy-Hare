@@ -1,0 +1,3082 @@
+Starting Klippy...
+Args: ['/home/user/klipper/klippy/klippy.py', '/home/user/printer_data/config/printer.cfg', '-I', '/home/user/printer_data/comms/klippy.serial', '-l', '/home/user/printer_data/logs/klippy.log', '-a', '/home/user/printer_data/comms/klippy.sock']
+Git version: 'v0.13.0-463-g2bd0acb6-dirty'
+Untracked files: klippy/extras/mmu_encoder.py, klippy/extras/mmu_espooler.py, klippy/extras/mmu_led_effect.py, klippy/extras/mmu_leds.py, klippy/extras/mmu_machine.py, klippy/extras/mmu_sensors.py, klippy/extras/mmu_servo.py
+Branch: master
+Remote: origin
+Tracked URL: https://github.com/Klipper3d/klipper
+CPU: 4 core ?
+Device: Raspberry Pi 5 Model B Rev 1.1
+Linux: Linux version 6.12.62+rpt-rpi-2712 (serge@raspberrypi.com) (aarch64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT Debian 1:6.12.62-1+rpt1 (2025-12-18)
+Python: '3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]'
+Start printer at Sun Apr 26 06:24:56 2026 (1777177496.8 227669.0)
+===== Config file =====
+[virtual_sdcard]
+path = /home/user/printer_data/gcodes
+on_error_gcode = CANCEL_PRINT
+
+[pause_resume]
+
+[display_status]
+
+[respond]
+default_type = command
+
+[gcode_macro CANCEL_PRINT]
+description = Cancel print
+rename_existing = BASE_CANCEL_PRINT
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CLIENT_VARS'] %}
+	{% set reset_ttg_on_cancel = vars.reset_ttg_on_cancel|default('true')|lower == 'true' %}
+	{% set unload_tool_on_cancel = vars.unload_tool_on_cancel|default('false')|lower == 'true' %}
+	
+	MMU_LOG MSG="Print cancelled!"
+	{% if not printer.mmu.enabled %}
+	_MMU_PARK OPERATION="cancel"
+	{% else %}
+	{% if unload_tool_on_cancel %}
+	MMU_LOG MSG="Ejecting filament on print cancel"
+	MMU_UNLOAD RESTORE=0
+	{% endif %}
+	{% if reset_ttg_on_cancel %}
+	MMU_TTG_MAP RESET=1 QUIET=1
+	{% endif %}
+	{% endif %}
+	_MMU_CLEAR_POSITION
+	TURN_OFF_HEATERS
+	M107
+	SET_PAUSE_NEXT_LAYER ENABLE=0
+	SET_PAUSE_AT_LAYER ENABLE=0 LAYER=0
+	{vars.user_cancel_extension|default("")}
+	BASE_CANCEL_PRINT
+
+[gcode_macro PAUSE]
+description = Pause the print and park
+rename_existing = BASE_PAUSE
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CLIENT_VARS'] %}
+	
+	{% if printer.pause_resume.is_paused %}
+	MMU_LOG MSG="Print is already paused"
+	{% else %}
+	_MMU_SAVE_POSITION
+	BASE_PAUSE
+	{% if not printer.mmu.enabled %}
+	_MMU_PARK OPERATION="pause"
+	{% endif %}
+	{vars.user_pause_extension|default("")}
+	{% endif %}
+
+[gcode_macro RESUME]
+description = Resume the print
+rename_existing = BASE_RESUME
+variable_last_extruder_temp = {'restore': False, 'temp': 0}
+variable_restore_idle_timeout = 0
+variable_idle_state = False
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CLIENT_VARS'] %}
+	
+	{% if not printer.pause_resume.is_paused %}
+	MMU_LOG MSG="Print is not paused. Resume ignored"
+	{% else %}
+	{vars.user_resume_extension|default("")}
+	{% if not printer.mmu.enabled %}
+	_MMU_RESTORE_POSITION
+	{% endif %}
+	BASE_RESUME
+	{% endif %}
+
+[gcode_macro SET_PAUSE_NEXT_LAYER]
+description = Enable a pause if the next layer is reached
+gcode = 
+	{% set pause_next_layer = printer['gcode_macro SET_PRINT_STATS_INFO'].pause_next_layer %}
+	{% set ENABLE = params.ENABLE|default(1)|int != 0 %}
+	{% set MACRO = params.MACRO|default(pause_next_layer.call, True) %}
+	SET_GCODE_VARIABLE MACRO=SET_PRINT_STATS_INFO VARIABLE=pause_next_layer VALUE="{{ 'enable': ENABLE, 'call': MACRO }}"
+
+[gcode_macro SET_PAUSE_AT_LAYER]
+description = Enable/disable a pause if a given layer number is reached
+gcode = 
+	{% set pause_at_layer = printer['gcode_macro SET_PRINT_STATS_INFO'].pause_at_layer %}
+	{% set ENABLE = params.ENABLE|int != 0 if params.ENABLE is defined else params.LAYER is defined %}
+	{% set LAYER = params.LAYER|default(pause_at_layer.layer)|int %}
+	{% set MACRO = params.MACRO|default(pause_at_layer.call, True) %}
+	SET_GCODE_VARIABLE MACRO=SET_PRINT_STATS_INFO VARIABLE=pause_at_layer VALUE="{{ 'enable': ENABLE, 'layer': LAYER, 'call': MACRO }}"
+
+[gcode_macro SET_PRINT_STATS_INFO]
+rename_existing = SET_PRINT_STATS_INFO_BASE
+description = Overwrite, to get pause_next_layer and pause_at_layer feature
+variable_pause_next_layer = { 'enable': False, 'call': "PAUSE" }
+variable_pause_at_layer = { 'enable': False, 'layer': 0, 'call': "PAUSE" }
+gcode = 
+	{% if pause_next_layer.enable %}
+	MMU_LOG MSG='{"%s, forced by pause_next_layer" % pause_next_layer.call}'
+	{pause_next_layer.call}
+	SET_PAUSE_NEXT_LAYER ENABLE=0
+	{% elif pause_at_layer.enable and params.CURRENT_LAYER is defined and params.CURRENT_LAYER|int == pause_at_layer.layer %}
+	MMU_LOG MSG='{"%s, forced by pause_at_layer [%d]" % (pause_at_layer.call, pause_at_layer.layer)}'
+	{pause_at_layer.call}
+	SET_PAUSE_AT_LAYER ENABLE=0
+	{% endif %}
+	SET_PRINT_STATS_INFO_BASE {rawparams}
+
+[gcode_macro _TOOLHEAD_PARK_PAUSE_CANCEL]
+description = Helper: park toolhead used in PAUSE and CANCEL_PRINT
+gcode = 
+	
+	{% set client = printer['gcode_macro _CLIENT_VARIABLE'] | default({}) %}
+	{% set velocity = printer.configfile.settings.pause_resume.recover_velocity %}
+	{% set use_custom     = client.use_custom_pos | default(false) | lower == 'true' %}
+	{% set custom_park_x  = client.custom_park_x | default(0.0) %}
+	{% set custom_park_y  = client.custom_park_y | default(0.0) %}
+	{% set park_dz        = client.custom_park_dz | default(2.0) | abs %}
+	{% set sp_hop         = client.speed_hop | default(15) * 60 %}
+	{% set sp_move        = client.speed_move | default(velocity) * 60 %}
+	
+	{% set origin    = printer.gcode_move.homing_origin %}
+	{% set act       = printer.gcode_move.gcode_position %}
+	{% set max       = printer.toolhead.axis_maximum %}
+	{% set cone      = printer.toolhead.cone_start_z | default(max.z) %}
+	{% set round_bed = True if printer.configfile.settings.printer.kinematics is in ['delta','polar','rotary_delta','winch']
+	else False %}
+	
+	{% set z_min = params.Z_MIN | default(0) | float %}
+	{% set z_park = [[(act.z + park_dz), z_min]|max, (max.z - origin.z)] | min %}
+	{% set x_park = params.X       if params.X is defined
+	else custom_park_x  if use_custom
+	else 0.0            if round_bed
+	else (max.x - 5.0) %}
+	{% set y_park = params.Y       if params.Y is defined
+	else custom_park_y  if use_custom
+	else (max.y - 5.0)  if round_bed and z_park < cone
+	else 0.0            if round_bed
+	else (max.y - 5.0) %}
+	
+	_CLIENT_RETRACT
+	{% if "xyz" in printer.toolhead.homed_axes %}
+	G90
+	G1 Z{z_park} F{sp_hop}
+	G1 X{x_park} Y{y_park} F{sp_move}
+	{% if not printer.gcode_move.absolute_coordinates %} G91 {% endif %}
+	{% else %}
+	RESPOND TYPE=echo MSG='Printer not homed'
+	{% endif %}
+
+[gcode_macro _CLIENT_EXTRUDE]
+description = Extrudes, if the extruder is hot enough
+gcode = 
+	
+	{% set client = printer['gcode_macro _CLIENT_VARIABLE'] | default({}) %}
+	{% set use_fw_retract = (client.use_fw_retract | default(false) | lower == 'true') and (printer.firmware_retraction is defined) %}
+	{% set length = params.LENGTH | default(client.unretract) | default(1.0) | float %}
+	{% set speed = params.SPEED | default(client.speed_unretract) | default(35) %}
+	{% set absolute_extrude = printer.gcode_move.absolute_extrude %}
+	
+	{% if printer.toolhead.extruder != '' %}
+	{% if printer[printer.toolhead.extruder].can_extrude %}
+	{% if use_fw_retract %}
+	{% if length < 0 %}
+	G10
+	{% else %}
+	G11
+	{% endif %}
+	{% else %}
+	M83
+	G1 E{length} F{(speed | float | abs) * 60}
+	{% if absolute_extrude %}
+	M82
+	{% endif %}
+	{% endif %}
+	{% else %}
+	RESPOND TYPE=echo MSG='{"\"%s\" not hot enough" % printer.toolhead.extruder}'
+	{% endif %}
+	{% endif %}
+
+[gcode_macro _CLIENT_RETRACT]
+description = Retracts, if the extruder is hot enough
+gcode = 
+	{% set client = printer['gcode_macro _CLIENT_VARIABLE'] | default({}) %}
+	{% set length = params.LENGTH | default(client.retract) | default(1.0) | float %}
+	{% set speed = params.SPEED | default(client.speed_retract) | default(35) %}
+	
+	_CLIENT_EXTRUDE LENGTH=-{length | float | abs} SPEED={speed | float | abs}
+
+[gcode_macro _CLIENT_LINEAR_MOVE]
+description = Linear move with save and restore of the gcode state
+gcode = 
+	{% set x_move = "X" ~ params.X if params.X is defined else "" %}
+	{% set y_move = "Y" ~ params.Y if params.Y is defined else "" %}
+	{% set z_move = "Z" ~ params.Z if params.Z is defined else "" %}
+	{% set e_move = "E" ~ params.E if params.E is defined else "" %}
+	{% set rate = "F" ~ params.F if params.F is defined else "" %}
+	{% set ABSOLUTE = params.ABSOLUTE | default(0) | int != 0 %}
+	{% set ABSOLUTE_E = params.ABSOLUTE_E | default(0) | int != 0 %}
+	SAVE_GCODE_STATE NAME=_client_movement
+	{% if x_move or y_move or z_move %}
+	G9{ 0 if ABSOLUTE else 1 }
+	{% endif %}
+	{% if e_move %}
+	M8{ 2 if ABSOLUTE_E else 3 }
+	{% endif %}
+	G1 { x_move } { y_move } { z_move } { e_move } { rate }
+	RESTORE_GCODE_STATE NAME=_client_movement
+
+[mcu mmu]
+serial = /dev/serial/by-id/usb-Klipper_rp2040_E66488C15F3E1835-if00
+
+[board_pins mmu]
+mcu = mmu
+aliases = 
+	
+	MMU_GATE_SENSOR_0=gpio5,
+	MMU_GATE_SENSOR_1=gpio8,
+	MMU_NEOPIXEL=gpio22,
+	
+	
+	MMU_SERVO_0=gpio16,
+	MMU_SERVO_1=gpio17,
+	MMU_SERVO_2=gpio18,
+	MMU_SERVO_3=gpio19,
+	
+	
+	YAMMU_BLDC_PWM_0=gpio4,
+	YAMMU_BLDC_DIR_0=gpio2,
+	YAMMU_BLDC_TACH_0=gpio21,
+	YAMMU_BLDC_DIR_1=gpio20,
+	YAMMU_BLDC_PWM_1=gpio7,
+	YAMMU_BLDC_TACH_1=gpio11,
+
+[gcode_macro _MMU_CUT_TIP]
+description = Cut filament by pressing the cutter on a pin with a horizontal movement
+variable_output_park_pos = 0
+gcode = 
+	{% set final_eject = params.FINAL_EJECT|default(0)|int %}
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set pin_loc_x, pin_loc_y = vars.pin_loc_xy|map('float') %}
+	{% set pin_park_dist = vars['pin_park_dist']|float %}
+	{% set retract_length = vars['retract_length']|float %}
+	{% set simple_tip_forming = vars['simple_tip_forming']|default(true)|lower == 'true' %}
+	{% set blade_pos = vars['blade_pos']|float %}
+	{% set rip_length = vars['rip_length']|float %}
+	{% set pushback_length = vars['pushback_length']|float %}
+	{% set pushback_dwell_time = vars['pushback_dwell_time']|int %}
+	{% set extruder_move_speed = vars['extruder_move_speed']|float %}
+	{% set travel_speed = vars['travel_speed']|float %}
+	{% set restore_position = vars['restore_position']|default(true)|lower == 'true' %}
+	{% set extruder_park_pos = blade_pos + rip_length %}
+	{% set cutting_axis = vars['cutting_axis'] %}
+	
+	{% if cutting_axis == "x" %}
+	{% set pin_park_x_loc = pin_loc_x + pin_park_dist %}
+	{% set pin_park_y_loc = pin_loc_y %}
+	{% else %}
+	{% set pin_park_y_loc = pin_loc_y + pin_park_dist %}
+	{% set pin_park_x_loc = pin_loc_x %}
+	{% endif %}
+	
+	{% if "xy" not in printer.toolhead.homed_axes %}
+	MMU_LOG MSG="Automatically homing XY"
+	G28 X Y
+	_CUT_TIP_MOVE_IN_BOUNDS
+	{% endif %}
+	
+	SAVE_GCODE_STATE NAME=_MMU_CUT_TIP_state
+	
+	G90
+	M83
+	G92 E0
+	
+	
+	{% set effective_retract_length = retract_length - printer.mmu.extruder_filament_remaining - park_vars.retracted_length %}
+	{% if effective_retract_length > 0 %}
+	MMU_LOG MSG="Retracting filament {effective_retract_length|round(1)}mm prior to cut"
+	G1 E-{effective_retract_length} F{extruder_move_speed * 60}
+	{% if simple_tip_forming %}
+	G1 E{effective_retract_length / 2} F{extruder_move_speed * 60}
+	G1 E-{effective_retract_length / 2} F{extruder_move_speed * 60}
+	{% endif %}
+	{% endif %}
+	
+	
+	_CUT_TIP_ADJUST_CURRENT
+	_CUT_TIP_MOVE_TO_CUTTER_PIN PIN_PARK_X_LOC={pin_park_x_loc} PIN_PARK_Y_LOC={pin_park_y_loc}
+	_CUT_TIP_GANTRY_SERVO_DOWN
+	_CUT_TIP_DO_CUT_MOTION PIN_PARK_X_LOC={pin_park_x_loc} PIN_PARK_Y_LOC={pin_park_y_loc} RIP_LENGTH={rip_length}
+	_CUT_TIP_GANTRY_SERVO_UP
+	_CUT_TIP_RESTORE_CURRENT
+	_MMU_EVENT EVENT="filament_cut"
+	
+	
+	{% set effective_pushback_length = [pushback_length, retract_length - printer.mmu.extruder_filament_remaining - park_vars.retracted_length]|min %}
+	{% if effective_pushback_length > 0 %}
+	MMU_LOG MSG="Pushing filament fragment back {effective_pushback_length|round(1)}mm after cut"
+	G1 E{effective_pushback_length} F{extruder_move_speed * 60}
+	G4 P{pushback_dwell_time}
+	G1 E-{effective_pushback_length} F{extruder_move_speed * 60}
+	{% endif %}
+	
+	
+	{% if final_eject %}
+	G92 E0
+	G1 E-80 F{extruder_move_speed * 60}
+	{% endif %}
+	
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_CUT_TIP VARIABLE=output_park_pos VALUE={extruder_park_pos}
+	
+	
+	RESTORE_GCODE_STATE NAME=_MMU_CUT_TIP_state MOVE={1 if restore_position else 0} MOVE_SPEED={travel_speed}
+
+[gcode_macro _CUT_TIP_ADJUST_CURRENT]
+description = Helper to optionally increase X/Y stepper current prior to cut
+variable_current_map = {}
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set cut_axis_steppers = (vars['cut_axis_steppers'] | default('')).split(',') | map('trim') | list %}
+	{% set cut_stepper_current = vars['cut_stepper_current'] | default(100) | int %}
+	{% set tmc_types = ["tmc2209", "tmc2130", "tmc2208", "tmc2660", "tmc5160", "tmc2240"] %}
+	
+	{% if not current_map %}
+	{% set ns = namespace(run_current={}) %}
+	{% if cut_stepper_current != 100 %}
+	{% for stepper in cut_axis_steppers %}
+	{% for tmc in tmc_types %}
+	{% set fullname = tmc ~ ' ' ~ stepper %}
+	{% if printer[fullname] is defined %}
+	
+	{% set cur_rc = printer[fullname].run_current %}
+	{% if ns.run_current.update({stepper: cur_rc}) %}{% endif %}
+	{% set new_rc = cur_rc * cut_stepper_current | float / 100 %}
+	MMU_LOG MSG="Adjusting {stepper} current"
+	SET_TMC_CURRENT STEPPER={stepper} CURRENT={new_rc}
+	{% endif %}
+	{% endfor %}
+	{% endfor %}
+	{% endif %}
+	
+	SET_GCODE_VARIABLE MACRO=_CUT_TIP_ADJUST_CURRENT VARIABLE=current_map VALUE="{ns.run_current}"
+	{% endif %}
+
+[gcode_macro _CUT_TIP_RESTORE_CURRENT]
+description = Helper to restore X/Y stepper current after cutting action
+gcode = 
+	{% set current_vars = printer['gcode_macro _CUT_TIP_ADJUST_CURRENT'] %}
+	{% set current_map = current_vars['current_map'] %}
+	
+	{% if current_map %}
+	{% for stepper, current in current_map.items() %}
+	MMU_LOG MSG="Restoring {stepper} current"
+	SET_TMC_CURRENT STEPPER={stepper} CURRENT={current}
+	{% endfor %}
+	{% endif %}
+	
+	SET_GCODE_VARIABLE MACRO=_CUT_TIP_ADJUST_CURRENT VARIABLE=current_map VALUE="{{}}"
+
+[gcode_macro _CUT_TIP_MOVE_IN_BOUNDS]
+description = Helper to move the toolhead to a legal position after homing
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set travel_speed = vars['travel_speed']|float %}
+	
+	{% set pos = printer.gcode_move.gcode_position %}
+	{% set axis_minimum = printer.toolhead.axis_minimum %}
+	{% set axis_maximum = printer.toolhead.axis_maximum %}
+	{% set x = [axis_minimum.x, [axis_maximum.x, pos.x]|min]|max %}
+	{% set y = [axis_minimum.y, [axis_maximum.y, pos.y]|min]|max %}
+	
+	MMU_LOG MSG="Warning: Klipper reported out of range gcode position (x:{pos.x}, y:{pos.y})! Adjusted to (x:{x}, y:{y}) to prevent move failure" ERROR=1
+	G1 X{x} Y{y} F{travel_speed * 60}
+
+[gcode_macro _CUT_TIP_MOVE_TO_CUTTER_PIN]
+description = Helper to move the toolhead to the target pin in either safe or faster way, depending on toolhead clearance
+gcode = 
+	{% set pin_park_x_loc = params.PIN_PARK_X_LOC|float %}
+	{% set pin_park_y_loc = params.PIN_PARK_Y_LOC|float %}
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	
+	{% set safe_margin_x, safe_margin_y = vars.safe_margin_xy|map('float') %}
+	{% set travel_speed = vars['travel_speed']|float %}
+	{% set cutting_axis = vars['cutting_axis'] %}
+	
+	{% if ((printer.gcode_move.gcode_position.x - pin_park_x_loc)|abs < safe_margin_x) or ((printer.gcode_move.gcode_position.y - pin_park_y_loc)|abs < safe_margin_y) %}
+	
+	{% if cutting_axis == "x" %}
+	G1 X{pin_park_x_loc} F{travel_speed * 60}
+	G1 Y{pin_park_y_loc} F{travel_speed * 60}
+	{% else %}
+	G1 Y{pin_park_y_loc} F{travel_speed * 60}
+	G1 X{pin_park_x_loc} F{travel_speed * 60}
+	{% endif %}
+	{% else %}
+	G1 X{pin_park_x_loc} Y{pin_park_y_loc} F{travel_speed * 60}
+	{% endif %}
+
+[gcode_macro _CUT_TIP_DO_CUT_MOTION]
+description = Helper to do a single cut movement
+gcode = 
+	{% set pin_park_x_loc = params.PIN_PARK_X_LOC | float %}
+	{% set pin_park_y_loc = params.PIN_PARK_Y_LOC | float %}
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set cutting_axis = vars['cutting_axis'] %}
+	
+	{% set pin_loc = vars['pin_loc_compressed']|default(-999)|float %}
+	{% if pin_loc != -999 %}
+	
+	{% if cutting_axis == "x" %}
+	{% set pin_loc_compressed_x = pin_loc %}
+	{% set pin_loc_compressed_y = pin_park_y_loc %}
+	{% else %}
+	{% set pin_loc_compressed_x = pin_park_x_loc %}
+	{% set pin_loc_compressed_y = pin_loc %}
+	{% endif %}
+	{% else %}
+	
+	{% set pin_loc_compressed_x, pin_loc_compressed_y = vars.pin_loc_compressed_xy|map('float') %}
+	{% endif %}
+	
+	{% set cut_fast_move_fraction = vars['cut_fast_move_fraction']|float %}
+	{% set cut_fast_move_speed = vars['cut_fast_move_speed']|float %}
+	{% set cut_slow_move_speed = vars['cut_slow_move_speed']|float %}
+	{% set cut_dwell_time = vars['cut_dwell_time']|float %}
+	{% set evacuate_speed = vars['evacuate_speed']|float %}
+	{% set rip_length = vars['rip_length']|float %}
+	{% set rip_speed = vars['rip_speed']|float %}
+	
+	
+	{% set fast_slow_transition_loc_x = (pin_loc_compressed_x - pin_park_x_loc) * cut_fast_move_fraction + pin_park_x_loc|float %}
+	{% set fast_slow_transition_loc_y = (pin_loc_compressed_y - pin_park_y_loc) * cut_fast_move_fraction + pin_park_y_loc|float %}
+	G1 X{fast_slow_transition_loc_x} Y{fast_slow_transition_loc_y} F{cut_fast_move_speed * 60}
+	G1 X{pin_loc_compressed_x} Y{pin_loc_compressed_y} F{cut_slow_move_speed * 60}
+	
+	G4 P{cut_dwell_time}
+	{% if rip_length > 0 %}
+	G1 E-{rip_length} F{rip_speed * 60}
+	{% endif %}
+	
+	G1 X{pin_park_x_loc} Y{pin_park_y_loc} F{evacuate_speed * 60}
+
+[gcode_macro _CUT_TIP_GANTRY_SERVO_DOWN]
+description = Operate optional gantry servo operated pin
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set gantry_servo_enabled = vars['gantry_servo_enabled']|default(true)|lower == 'true' %}
+	{% set angle = vars['gantry_servo_down_angle']|float %}
+	
+	{% if gantry_servo_enabled %}
+	SET_SERVO SERVO=mmu_gantry_servo ANGLE={angle}
+	G4 P500
+	{% endif %}
+
+[gcode_macro _CUT_TIP_GANTRY_SERVO_UP]
+description = Operate optional gantry servo operated pin
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_CUT_TIP_VARS'] %}
+	{% set gantry_servo_enabled = vars['gantry_servo_enabled']|default(true)|lower == 'true' %}
+	{% set angle = vars['gantry_servo_up_angle']|float %}
+	
+	{% if gantry_servo_enabled %}
+	SET_SERVO SERVO=mmu_gantry_servo ANGLE={angle} DURATION=0.5
+	{% endif %}
+
+[gcode_macro _MMU_FORM_TIP]
+description = Standalone macro that mimics Superslicer process
+gcode = 
+	{% set final_eject = params.FINAL_EJECT|default(0)|int %}
+	{% set vars = printer['gcode_macro _MMU_FORM_TIP_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set unloading_speed_start = vars['unloading_speed_start']|int %}
+	{% set unloading_speed = vars['unloading_speed']|int %}
+	{% set ramming_volume = vars['ramming_volume']|float %}
+	{% set ramming_volume_standalone = vars['ramming_volume_standalone']|float %}
+	{% set cooling_tube_length = vars['cooling_tube_length']|float %}
+	{% set cooling_tube_position = vars['cooling_tube_position']|float %}
+	{% set initial_cooling_speed = vars['initial_cooling_speed']|int %}
+	{% set final_cooling_speed = vars['final_cooling_speed']|int %}
+	{% set cooling_moves = vars['cooling_moves']|int %}
+	{% set toolchange_temp = vars['toolchange_temp']|default(0)|int %}
+	{% set use_skinnydip = vars['use_skinnydip']|default(false)|lower == 'true' %}
+	{% set use_fast_skinnydip = vars['use_fast_skinnydip']|default(false)|lower == 'true' %}
+	{% set skinnydip_distance = vars['skinnydip_distance']|float %}
+	{% set dip_insertion_speed = vars['dip_insertion_speed']|int %}
+	{% set dip_extraction_speed = vars['dip_extraction_speed']|int %}
+	{% set melt_zone_pause = vars['melt_zone_pause']|default(0)|int %}
+	{% set cooling_zone_pause = vars['cooling_zone_pause']|default(0)|int %}
+	{% set extruder_eject_speed = vars['extruder_eject_speed']|int %}
+	{% set parking_distance = vars['parking_distance']|default(0)|float %}
+	{% set orig_temp = printer.extruder.target %}
+	{% set next_temp = params.NEXT_TEMP|default(orig_temp)|int %}
+	
+	
+	{% set runout = printer.mmu.runout %}
+	{% set printing = printer.mmu.print_state == 'printing' %}
+	
+	SAVE_GCODE_STATE NAME=MMU_FORM_TIP_state
+	
+	G91
+	M83
+	G92 E0
+	
+	
+	
+	{% set ramming_volume = ramming_volume_standalone if not printing else ramming_volume %}
+	{% if ramming_volume > 0 %}
+	{% set ratio = ramming_volume / 23.0 %}
+	G1 E{0.5784 * ratio} F299
+	G1 E{0.5834 * ratio} F302
+	G1 E{0.5918 * ratio} F306
+	G1 E{0.6169 * ratio} F319
+	G1 E{0.3393 * ratio} F350
+	G1 E{0.3363 * ratio} F350
+	G1 E{0.7577 * ratio} F392
+	G1 E{0.8382 * ratio} F434
+	G1 E{0.7776 * ratio} F469
+	G1 E{0.1293 * ratio} F469
+	G1 E{0.9673 * ratio} F501
+	G1 E{1.0176 * ratio} F527
+	G1 E{0.5956 * ratio} F544
+	G1 E{0.4555 * ratio} F544
+	G1 E{1.0662 * ratio} F552
+	{% endif %}
+	
+	
+	
+	{% set total_retraction_distance = cooling_tube_position - printer.mmu.extruder_filament_remaining - park_vars.retracted_length + cooling_tube_length - 15 %}
+	G1 E-15 F{1.0 * unloading_speed_start * 60}
+	{% if total_retraction_distance > 0 %}
+	G1 E-{(0.7 * total_retraction_distance)|round(2)} F{1.0 * unloading_speed * 60}
+	G1 E-{(0.2 * total_retraction_distance)|round(2)} F{0.5 * unloading_speed * 60}
+	G1 E-{(0.1 * total_retraction_distance)|round(2)} F{0.3 * unloading_speed * 60}
+	{% endif %}
+	
+	
+	{% if toolchange_temp > 0 %}
+	M104 S{toolchange_temp}
+	{% if not use_fast_skinnydip %}
+	_WAIT_FOR_TEMP
+	{% endif %}
+	{% endif %}
+	
+	
+	
+	{% set speed_inc = (final_cooling_speed - initial_cooling_speed) / (2 * cooling_moves - 1) %}
+	{% for move in range(cooling_moves) %}
+	{% set speed = initial_cooling_speed + speed_inc * move * 2 %}
+	G1 E{cooling_tube_length} F{speed * 60}
+	G1 E-{cooling_tube_length} F{(speed + speed_inc) * 60}
+	{% endfor %}
+	
+	
+	{% if toolchange_temp > 0 and use_skinnydip and use_fast_skinnydip %}
+	_WAIT_FOR_TEMP
+	{% endif %}
+	
+	
+	
+	{% if use_skinnydip %}
+	G1 E{skinnydip_distance} F{dip_insertion_speed * 60}
+	G4 P{melt_zone_pause}
+	G1 E-{skinnydip_distance} F{dip_extraction_speed * 60}
+	G4 P{cooling_zone_pause}
+	{% endif %}
+	
+	
+	
+	M104 S{next_temp}
+	
+	
+	
+	{% if final_eject %}
+	G92 E0
+	G1 E-80 F{extruder_eject_speed * 60}
+	{% elif parking_distance > 0 %}
+	G90
+	M82
+	G1 E-{parking_distance} F{extruder_eject_speed * 60}
+	{% endif %}
+	
+	
+	RESTORE_GCODE_STATE NAME=MMU_FORM_TIP_state
+
+[gcode_macro _WAIT_FOR_TEMP]
+description = Helper function for fan assisted extruder temp reduction
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_FORM_TIP_VARS'] %}
+	{% set toolchange_temp = vars['toolchange_temp']|default(0)|int %}
+	{% set toolchange_use_fan = vars['toolchange_fan_assist']|default(false)|lower == 'true' %}
+	{% set toolchange_fan_speed = vars['toolchange_fan_speed']|default(50)|int %}
+	{% set toolchange_fan = vars['toolchange_fan_name']|default('')|string %}
+	
+	MMU_LOG MSG='{"Waiting for extruder temp %d\u00B0C..." % toolchange_temp}'
+	{% if toolchange_use_fan %}
+	{% if printer.fan is defined or printer[toolchange_fan] is defined %}
+	{% set orig_fan_speed = printer[toolchange_fan].speed if printer[toolchange_fan] is defined else printer.fan.speed %}
+	M106 S{(toolchange_fan_speed / 100 * 255)|int}
+	M109 S{toolchange_temp}
+	M106 S{(orig_fan_speed * 255)|int}
+	{% else %}
+	MMU_LOG MSG="Warning: Printer part fan is not defined. Ignoring 'toolchange_use_fan' option" ERROR=1
+	M109 S{toolchange_temp}
+	{% endif %}
+	{% else %}
+	M109 S{toolchange_temp}
+	{% endif %}
+
+[mmu_machine]
+num_gates = 4,4,3
+mmu_vendor = Other
+mmu_version = 1.0
+selector_type = MacroSelector
+filament_always_gripped = 0
+display_name = YAMMU
+environment_sensor = 
+homing_extruder = 1
+
+[duplicate_pin_override]
+pins = mmu:YAMMU_BLDC_DIR
+
+[mmu_gear_bldc unit0]
+dir_pin = mmu:YAMMU_BLDC_DIR_0
+direction_map = 0,1,0,1
+pwm_pin = !mmu:YAMMU_BLDC_PWM_0
+pwm_min = 0.85
+pwm_max = 1.00
+hardware_pwm = True
+cycle_time = 0.00005
+rotation_distance = 3.6029
+max_rpm = 6000
+kick_start_time = 0.10
+tachometer_pin = ^mmu:YAMMU_BLDC_TACH_0
+tachometer_ppr = 9
+tachometer_sample_time = 0.02
+tachometer_poll_interval = 0.00025
+tachometer_control_enabled = 1
+
+[mmu_gear_bldc unit1]
+dir_pin = mmu:YAMMU_BLDC_DIR_1
+direction_map = 0,1,0,1
+pwm_pin = !mmu:YAMMU_BLDC_PWM_1
+pwm_min = 0.85
+pwm_max = 1.00
+hardware_pwm = True
+cycle_time = 0.00005
+rotation_distance = 3.6029
+max_rpm = 6000
+kick_start_time = 0.10
+tachometer_pin = ^mmu:YAMMU_BLDC_TACH_1
+tachometer_ppr = 9
+tachometer_sample_time = 0.02
+tachometer_poll_interval = 0.00025
+
+[stepper_mmu_gear]
+step_pin = gpio11
+dir_pin = gpio10
+enable_pin = !gpio12
+microsteps = 16
+rotation_distance = 22.7316868
+gear_ratio = 1:1
+full_steps_per_rotation = 200
+
+[tmc2209 stepper_mmu_gear]
+uart_pin = gpio9
+tx_pin = gpio8
+uart_address = 0
+run_current = 1.200
+hold_current = 0.010
+stealthchop_threshold = 999999
+
+[servo MMU_SERVO_0]
+pin = mmu:MMU_SERVO_0
+initial_angle = 90
+
+[servo MMU_SERVO_1]
+pin = mmu:MMU_SERVO_1
+initial_angle = 90
+
+[servo MMU_SERVO_2]
+pin = mmu:MMU_SERVO_2
+initial_angle = 90
+
+[servo MMU_SERVO_3]
+pin = mmu:MMU_SERVO_3
+initial_angle = 90
+
+[mmu_sensors]
+gate_switch_pin = ^!mmu:MMU_GATE_SENSOR_0,^!mmu:MMU_GATE_SENSOR_1, ^!gpio25
+sync_feedback_tension_pin = 
+sync_feedback_compression_pin = 
+extruder_switch_pin = ^!gpio3
+toolhead_switch_pin = ^!gpio4
+
+[neopixel mmu_leds]
+pin = mmu:MMU_NEOPIXEL
+chain_count = 18
+color_order = GRBW
+
+[mmu_leds unit0]
+exit_leds = neopixel:mmu_leds (1-8)
+frame_rate = 24
+enabled = True
+animation = True
+exit_effect = gate_status
+entry_effect = filament_color
+status_effect = filament_color
+logo_effect = (0, 0, 0.3)
+white_light = (1, 1, 1)
+black_light = (.01, 0, .02)
+empty_light = (0, 0, 0)
+effect_loading = mmu_blue_clockwise_slow, (0, 0, 0.4)
+effect_loading_extruder = mmu_blue_clockwise_fast, (0, 0, 1)
+effect_unloading = mmu_blue_anticlock_slow, (0, 0, 0.4)
+effect_unloading_extruder = mmu_blue_anticlock_fast, (0, 0, 1)
+effect_heating = mmu_breathing_red,       (0.3, 0, 0)
+effect_selecting = mmu_white_fast,          (0.2, 0.2, 0.2)
+effect_checking = mmu_white_fast,          (0.8, 0.8, 0.8)
+effect_initialized = mmu_rainbow,             (0.5, 0.2, 0)
+effect_error = mmu_strobe,              (1, 0, 0)
+effect_complete = mmu_sparkle,             (0.3, 0.3, 0.3)
+effect_gate_selected = mmu_static_blue,         (0, 0, 1)
+effect_gate_available = mmu_static_green,        (0, 0.5, 0)
+effect_gate_available_sel = mmu_ready_green,         (0, 0.75, 0)
+effect_gate_unknown = mmu_static_orange,       (0.5, 0.2, 0)
+effect_gate_unknown_sel = mmu_ready_orange,        (0.75, 0.3, 0)
+effect_gate_empty = mmu_static_black,        (0, 0, 0)
+effect_gate_empty_sel = mmu_ready_orange2,       (0.1, 0.04, 0)
+
+[gcode_macro _MMU_VENT]
+description = Simple reference MMU enclosure venting control
+gcode = 
+	
+	{% set gates = (params.GATES | default('')).split(',') | map('trim') | list %}
+	
+	{% if gates == [''] %}
+	
+	MMU_LOG MSG="Opening MMU vent..."
+	
+	
+	{% else %}
+	
+	MMU_LOG MSG="Opening MMU vent to dry filaments in gates: {", ".join(gates)}..."
+	{% for gate in range(gate) %}
+	
+	{% endfor %}
+	
+	{% endif %}
+	
+	
+	
+	UPDATE_DELAYED_GCODE ID=_MMU_VENT_CLOSE DURATION=10
+
+[delayed_gcode _MMU_VENT_CLOSE]
+gcode = 
+	MMU_LOG MSG="Closing MMU vent..."
+
+[mmu_led_effect mmu_breathing_red]
+layers = breathing 4 0 top (1,0,0)
+
+[mmu_led_effect mmu_white_slow]
+define_on = exit, status
+layers = breathing 1.0 0 top (0.8,0.8,0.8)
+
+[mmu_led_effect mmu_white_fast]
+define_on = exit, status
+layers = breathing 0.6 0 top (0.2,0.2,0.2)
+
+[mmu_led_effect mmu_blue_clockwise_slow]
+define_on = gates, status
+layers = chase .5 .5 top (0,0,1), (0,0,.4)
+
+[mmu_led_effect mmu_blue_clockwise_fast]
+define_on = gates, status
+layers = chase 1 .5 top (0,0,1), (0,0,.4)
+
+[mmu_led_effect mmu_blue_anticlock_slow]
+define_on = gates, status
+layers = chase -.5 .5 top (0,0,1), (0,0,.4)
+
+[mmu_led_effect mmu_blue_anticlock_fast]
+define_on = gates, status
+layers = chase -1 .5 top (0,0,1), (0,0,.4)
+
+[mmu_led_effect mmu_strobe]
+layers = strobe    1 1.5 add (1,1,1)
+	breathing 2 0   difference (0.95,0,0)
+	static    0 0   top (1,0,0)
+
+[mmu_led_effect mmu_static_green]
+define_on = gates
+layers = static 0 0 top (0,0.5,0)
+
+[mmu_led_effect mmu_ready_green]
+define_on = gates
+layers = breathing 2 0 subtract (0,0.35,0)
+	static 0 0 top (0,0.5,0)
+
+[mmu_led_effect mmu_static_orange]
+define_on = gates
+layers = static 0 0 top (0.5,0.2,0)
+
+[mmu_led_effect mmu_ready_orange]
+define_on = gates
+layers = breathing 2 0 subtract (0.35,0.14,0)
+	static 0 0 top (0.5,0.2,0)
+
+[mmu_led_effect mmu_ready_orange2]
+define_on = gates
+layers = breathing 2 0 top (0.175,0.07,0)
+
+[mmu_led_effect mmu_static_blue]
+define_on = gates
+layers = static 0 0 top (0,0,1)
+
+[mmu_led_effect mmu_ready_blue]
+define_on = gates
+layers = breathing 2 0 add (0,0,0.5)
+	static 0 0 top (0,0,0)
+
+[mmu_led_effect mmu_static_black]
+define_on = gates
+layers = static 0 0 top (0,0,0)
+
+[mmu_led_effect mmu_rainbow]
+define_on = entry, exit, status
+layers = gradient  0.8  0.5 add (0.3, 0.0, 0.0), (0.0, 0.3, 0.0), (0.0, 0.0, 0.3)
+
+[mmu_led_effect mmu_sparkle]
+define_on = exit
+layers = twinkle 8 0.15 top (0.3,0.3,0.3), (0.4,0,0.25)
+
+[save_variables]
+filename = ~/printer_data/config/mmu/mmu_vars.cfg
+
+[extruder]
+max_extrude_only_distance = 10000.0
+max_extrude_cross_section = 2
+step_pin = gpio14
+dir_pin = gpio13
+enable_pin = !gpio15
+microsteps = 4
+rotation_distance = 93.24
+nozzle_diameter = 0.4
+filament_diameter = 1.75
+heater_pin = gpio23
+sensor_type = Generic 3950
+sensor_pin = gpio26
+control = pid
+pid_kp = 22.2
+pid_kd = 114
+pid_ki = 1.08
+min_temp = -200
+max_temp = 300
+min_extrude_temp = -200
+max_extrude_only_velocity = 1600.0
+max_extrude_only_accel = 3000.0
+
+[gcode_macro _MMU_SOFTWARE_VARS]
+description = Happy Hare optional configuration for print start/end checks
+gcode = 
+variable_user_pre_initialize_extension = ''
+variable_home_mmu = False
+variable_check_gates = True
+variable_load_initial_tool = True
+variable_automap_strategy = "none"
+variable_user_print_end_extension = ''
+variable_unload_tool = True
+variable_reset_ttg = False
+variable_dump_stats = True
+
+[gcode_macro _MMU_STATE_VARS]
+description = Happy Hare configuration for state change hooks
+gcode = 
+variable_user_action_changed_extension = ''
+variable_user_print_state_changed_extension = ''
+variable_user_mmu_event_extension = ''
+variable_servo_down_limit = 5000
+variable_cutter_blade_limit = 3000
+
+[gcode_macro _MMU_SEQUENCE_VARS]
+description = Happy Hare sequence macro configuration variables
+gcode = 
+variable_enable_park_printing = 'toolchange,runout,load,unload,complete,pause,cancel'
+variable_enable_park_standalone = 'toolchange,load,unload,pause,cancel'
+variable_enable_park_disabled = 'pause,cancel'
+variable_min_toolchange_z = 1.0
+variable_park_toolchange = -999, -999, 1,  5, 2
+variable_park_runout = -999, -999, 1,  5, 2
+variable_park_pause = 50,   50,   5,  0, 2
+variable_park_cancel = -999, -999, 10, 0, 5
+variable_park_complete = 50,   50,   10, 0, 5
+variable_pre_unload_position = -999, -999, 0
+variable_post_form_tip_position = -999, -999, 0
+variable_pre_load_position = -999, -999, 0
+variable_restore_xy_pos = "last"
+variable_park_travel_speed = 200
+variable_park_lift_speed = 15
+variable_retract_speed = 30
+variable_unretract_speed = 30
+variable_user_park_move_macro = ''
+variable_auto_home = True
+variable_timelapse = False
+variable_user_mmu_error_extension = ''
+variable_user_pre_unload_extension = ''
+variable_user_post_form_tip_extension = ''
+variable_user_post_unload_extension = ''
+variable_user_pre_load_extension = ''
+variable_user_post_load_extension = ''
+
+[gcode_macro _MMU_CUT_TIP_VARS]
+description = Happy Hare toolhead tip cutting macro configuration variables
+gcode = 
+variable_restore_position = False
+variable_blade_pos = 37.5
+variable_retract_length = 32.5
+variable_simple_tip_forming = True
+variable_cut_axis_steppers = 'stepper_x, stepper_y'
+variable_cut_stepper_current = 100
+variable_cutting_axis = "x"
+variable_pin_loc_xy = 14, 250
+variable_pin_park_dist = 5.0
+variable_pin_loc_compressed_xy = 0.5, 250
+variable_rip_length = 1.0
+variable_rip_speed = 3
+variable_pushback_length = 15.0
+variable_pushback_dwell_time = 0
+variable_travel_speed = 150
+variable_cut_fast_move_speed = 32
+variable_cut_slow_move_speed = 8
+variable_evacuate_speed = 150
+variable_cut_dwell_time = 50
+variable_cut_fast_move_fraction = 1.0
+variable_extruder_move_speed = 25
+variable_safe_margin_xy = 30, 30
+variable_gantry_servo_enabled = False
+variable_gantry_servo_down_angle = 55
+variable_gantry_servo_up_angle = 180
+
+[gcode_macro _MMU_FORM_TIP_VARS]
+description = Happy Hare tip forming macro configuration variables
+gcode = 
+variable_ramming_volume = 0
+variable_ramming_volume_standalone = 0
+variable_toolchange_temp = 0
+variable_toolchange_fan_assist = False
+variable_toolchange_fan_name = ''
+variable_toolchange_fan_speed = 50
+variable_unloading_speed_start = 80
+variable_unloading_speed = 18
+variable_cooling_tube_position = 35
+variable_cooling_tube_length = 10
+variable_initial_cooling_speed = 10
+variable_final_cooling_speed = 50
+variable_cooling_moves = 4
+variable_use_skinnydip = False
+variable_skinnydip_distance = 30
+variable_dip_insertion_speed = 30
+variable_dip_extraction_speed = 70
+variable_melt_zone_pause = 0
+variable_cooling_zone_pause = 0
+variable_use_fast_skinnydip = False
+variable_parking_distance = 0
+variable_extruder_eject_speed = 25
+
+[gcode_macro _MMU_PURGE_VARS]
+description = Happy Hare reference purging macro configuration variables
+gcode = 
+variable_extruder_purge_speed = 2
+
+[gcode_macro _MMU_CLIENT_VARS]
+description = Happy Hare client macro configuration variables
+gcode = 
+variable_reset_ttg_on_cancel = False
+variable_unload_tool_on_cancel = False
+variable_user_pause_extension = ''
+variable_user_resume_extension = ''
+variable_user_cancel_extension = ''
+
+[gcode_macro T0]
+gcode = MMU_CHANGE_TOOL TOOL=0
+
+[gcode_macro T1]
+gcode = MMU_CHANGE_TOOL TOOL=1
+
+[gcode_macro T2]
+gcode = MMU_CHANGE_TOOL TOOL=2
+
+[gcode_macro T3]
+gcode = MMU_CHANGE_TOOL TOOL=3
+
+[gcode_macro T4]
+gcode = MMU_CHANGE_TOOL TOOL=4
+
+[gcode_macro T5]
+gcode = MMU_CHANGE_TOOL TOOL=5
+
+[gcode_macro T6]
+gcode = MMU_CHANGE_TOOL TOOL=6
+
+[gcode_macro T7]
+gcode = MMU_CHANGE_TOOL TOOL=7
+
+[mmu]
+happy_hare_version = 3.42
+gear_max_velocity = 300
+gear_max_accel = 150
+selector_max_velocity = 250
+selector_max_accel = 1200
+servo_up_angle = 145
+servo_down_angle = 30
+servo_move_angle = 109
+servo_duration = 0.4
+servo_dwell = 0.5
+servo_always_active = 0
+servo_active_down = 0
+servo_buzz_gear_on_down = 0
+log_level = 1
+log_file_level = -1
+log_statistics = 1
+log_visual = 1
+log_startup_status = 1
+log_m117_messages = 1
+gear_from_spool_speed = 600
+gear_from_spool_accel = 100
+gear_from_buffer_speed = 600
+gear_from_buffer_accel = 100
+gear_unload_speed = 600
+gear_unload_accel = 100
+gear_short_move_speed = 200
+gear_short_move_accel = 100
+gear_short_move_threshold = 70
+gear_homing_speed = 250
+extruder_load_speed = 20
+extruder_unload_speed = 200
+extruder_sync_load_speed = 20
+extruder_sync_unload_speed = 200
+extruder_homing_speed = 15
+selector_move_speed = 200
+selector_homing_speed = 60
+selector_touch_speed = 80
+selector_touch_enabled = 0
+macro_toolhead_max_accel = 0
+macro_toolhead_min_cruise_ratio = 0.5
+gate_homing_endstop = mmu_gate
+gate_homing_max = 180
+gate_parking_distance = 23
+gate_preload_homing_max = 300
+gate_preload_parking_distance = -10
+gate_endstop_to_encoder = 10
+gate_unload_buffer = 50
+gate_load_retries = 2
+gate_autoload = 1
+gate_final_eject_distance = 600
+bowden_homing_max = 1500
+bowden_apply_correction = 0
+bowden_allowable_load_delta = 20.0
+bowden_pre_unload_test = 1
+bowden_pre_unload_error_tolerance = 50
+extruder_homing_max = 1000
+extruder_homing_endstop = extruder
+extruder_homing_buffer = 25
+extruder_collision_homing_current = 100
+extruder_force_homing = 0
+toolhead_homing_max = 320
+toolhead_extruder_to_nozzle = 72
+toolhead_sensor_to_nozzle = 12
+toolhead_entry_to_extruder = 30
+toolhead_residual_filament = 0
+toolhead_ooze_reduction = 0
+toolhead_unload_safety_margin = 10
+toolhead_post_load_tighten = 60
+toolhead_post_load_tension_adjust = 1
+toolhead_entry_tension_test = 0
+toolhead_move_error_tolerance = 60
+force_form_tip_standalone = 1
+form_tip_macro = _YAMMU_FORM_TIP
+extruder_form_tip_current = 100
+slicer_tip_park_pos = 0
+force_purge_standalone = 0
+purge_macro = 
+extruder_purge_current = 100
+sync_to_extruder = 1
+sync_gear_current = 100
+sync_form_tip = 1
+sync_purge = 1
+sync_feedback_enabled = 0
+sync_feedback_buffer_range = 6
+sync_feedback_buffer_maxrange = 12
+sync_feedback_speed_multiplier = 5
+sync_feedback_boost_multiplier = 3
+sync_feedback_extrude_threshold = 5
+sync_feedback_debug_log = 0
+espooler_min_distance = 30
+espooler_max_stepper_speed = 300
+espooler_min_stepper_speed = 0
+espooler_speed_exponent = 0.5
+espooler_assist_reduced_speed = 50
+espooler_printing_power = 0
+espooler_operations = rewind, assist, print
+espooler_assist_extruder_move_length = 100
+espooler_assist_burst_power = 100
+espooler_assist_burst_duration = 0.4
+espooler_assist_burst_trigger = 0
+espooler_assist_burst_trigger_max = 3
+espooler_rewind_burst_power = 100
+espooler_rewind_burst_duration = 0.4
+heater_max_temp = 70
+heater_default_dry_temp = 45
+heater_default_dry_time = 300
+heater_default_humidity = 25
+heater_vent_macro = _MMU_VENT
+heater_vent_interval = 0
+heater_rotate_interval = 5
+drying_data = { 'pla': (45, 300), 'pla+': (55, 300), 'petg': (60, 300), 'tpu': (55, 300), 'abs': (70, 300), 'abs+': (75, 300), 'asa': (65, 300), 'nylon': (75, 600), 'pc': (75, 600), 'pva': (75, 600), 'hips': (75, 600) }
+flowguard_enabled = 0
+flowguard_max_relief = 40
+flowguard_encoder_mode = 2
+flowguard_encoder_max_motion = 20
+endless_spool_enabled = 1
+endless_spool_on_load = 0
+endless_spool_eject_gate = -1
+spoolman_support = off
+pending_spool_id_timeout = 20
+t_macro_color = slicer
+console_stat_columns = unload, load, post_load, total
+console_stat_rows = total, total_average, job, job_average, last
+console_gate_stat = emoticon
+console_always_output_full = 1
+autocal_bowden_length = 1
+autotune_bowden_length = 1
+skip_cal_rotation_distance = 0
+autotune_rotation_distance = 0
+skip_cal_encoder = 0
+autotune_encoder = 0
+timeout_pause = 72000
+disable_heater = 600
+default_extruder_temp = 200
+extruder_temp_variance = 2
+startup_home_if_unloaded = 0
+startup_reset_ttg_map = 0
+show_error_dialog = 1
+preload_attempts = 5
+strict_filament_recovery = 0
+filament_recovery_on_pause = 1
+retry_tool_change_on_error = 0
+bypass_autoload = 1
+has_filament_buffer = 1
+encoder_move_validation = 1
+print_start_detection = 1
+extruder = extruder
+gcode_load_sequence = 0
+gcode_unload_sequence = 0
+update_trsync = 0
+canbus_comms_retries = 3
+update_bit_max_time = 1
+update_aht10_commands = 0
+pause_macro = PAUSE
+action_changed_macro = _MMU_ACTION_CHANGED
+print_state_changed_macro = _MMU_PRINT_STATE_CHANGED
+mmu_event_macro = _MMU_EVENT
+pre_unload_macro = _MMU_PRE_UNLOAD
+post_form_tip_macro = _MMU_POST_FORM_TIP
+post_unload_macro = _MMU_POST_UNLOAD
+pre_load_macro = _MMU_PRE_LOAD
+post_load_macro = _MMU_POST_LOAD
+unload_sequence_macro = _MMU_UNLOAD_SEQUENCE
+load_sequence_macro = _MMU_LOAD_SEQUENCE
+select_tool_macro = _YAMMU_SELECT_TOOL
+
+[gcode_macro _MMU_PURGE]
+description = Simple reference filament purge
+gcode = 
+	
+	{% set sequence_vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set retracted_length = park_vars.retracted_length %}
+	{% set retract_speed = sequence_vars.retract_speed|int %}
+	{% set unretract_speed = sequence_vars.unretract_speed|int %}
+	
+	
+	{% set toolchange_purge_volume = printer.mmu.toolchange_purge_volume|default(0)|float %}
+	{% set extruder_filament_remaining = printer.mmu.extruder_filament_remaining|default(0)|float %}
+	
+	
+	
+	{% set pv = printer.mmu.slicer_tool_map.purge_volumes %}
+	
+	
+	{% set filament_diameter = printer.configfile.config.extruder.filament_diameter|float %}
+	{% set filament_cross_section = (filament_diameter / 2) ** 2 * 3.1415 %}
+	{% set purge_len = toolchange_purge_volume / filament_cross_section %}
+	{% set segment_len = 2.0 %}
+	
+	
+	{% if retracted_length > 0 %}
+	MMU_LOG MSG="Un-retracting {retracted_length}mm"
+	M83
+	G1 E{retracted_length} F{unretract_speed|abs * 60}
+	{% endif %}
+	
+	{% if extruder_filament_remaining > 0 %}
+	MMU_LOG MSG="Purging {purge_len | round(1)}mm of filament including {extruder_filament_remaining | round(1)}mm fragment remaining in extruder (Total volume {(filament_cross_section * purge_len) | round(1)}mm³)"
+	{% else %}
+	MMU_LOG MSG="Purging {purge_len | round(1)}mm of filament (Total volume {(filament_cross_section * purge_len) | round(1)}mm³)"
+	{% endif %}
+	
+	
+	{% set num_segments = (purge_len // segment_len) | int %}
+	{% for _ in range(num_segments) %}
+	__MMU_PURGE_SEGMENT LENGTH={segment_len}
+	{% endfor %}
+	__MMU_PURGE_SEGMENT LENGTH={purge_len % segment_len}
+	
+	
+	{% if retracted_length > 0 %}
+	MMU_LOG MSG="Retracting {retracted_length}mm"
+	M83
+	G1 E-{retracted_length} F{retract_speed|abs * 60}
+	{% endif %}
+	
+	
+	{% if printer.mmu.sync_feedback_enabled %}
+	MMU_SYNC_FEEDBACK ADJUST_TENSION=1
+	{% endif %}
+	
+	MMU_LOG MSG="Purging complete"
+
+[gcode_macro __MMU_PURGE_SEGMENT]
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_PURGE_VARS'] %}
+	{% set extruder_purge_speed = vars['extruder_purge_speed']|float %}
+	{% set length = params.LENGTH|float %}
+	{% set clog_runout_detected = printer.mmu.clog_runout_detected|default(false)|lower == 'true' %}
+	
+	{% if not clog_runout_detected %}
+	G1 E{length} F{extruder_purge_speed * 60}
+	{% endif %}
+
+[gcode_macro _MMU_PARK]
+description = Park toolhead safely away from print
+variable_saved_xyz = 0, 0, 0
+variable_saved_pos = False
+variable_park_operation = ''
+variable_next_xy = 0, 0
+variable_next_pos = False
+variable_min_lifted_z = 0
+variable_toolchange_z = -1
+variable_retracted_length = 0
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set operation = params.OPERATION|default(printer.mmu.operation)|string|lower %}
+	{% set is_printing = printer.mmu.print_state in ["started", "printing"] and not printer.pause_resume.is_paused %}
+	{% set force_park = params.FORCE_PARK|default(0)|int == 1 %}
+	{% set force_park_x = params.X|default(-999)|float %}
+	{% set force_park_y = params.Y|default(-999)|float %}
+	{% set enable_park_printing = (vars.enable_park_printing|default("toolchange,runout,pause,cancel")|string|lower).split(",") %}
+	{% set enable_park_standalone = (vars.enable_park_standalone|default("toolchange,load,unload,pause,cancel")|string|lower).split(",") %}
+	{% set enable_park_disabled = (vars.enable_park_disabled|default("pause,cancel")|string|lower).split(",") %}
+	{% set nx,ny = next_xy|map('float') %}
+	{% set pos = printer.gcode_move.gcode_position %}
+	{% if force_park %}
+	{% set operation = 'force_park' %}
+	{% set x = force_park_x %}
+	{% set y = force_park_y %}
+	{% set park_z_hop = params.Z_HOP|default(0)|float %}
+	{% set z_hop_ramp = params.RAMP|default(0)|float %}
+	{% set retract = 0 %}
+	{% elif operation in ['toolchange','load','unload'] %}
+	{% set x, y, park_z_hop, z_hop_ramp, retract = vars.park_toolchange|default([-999,-999,0,0,0])|map('float') %}
+	{% elif operation in ['runout'] %}
+	{% set x, y, park_z_hop, z_hop_ramp, retract = vars.park_runout|default([-999,-999,0,0,0])|map('float') %}
+	{% elif operation in ['pause'] %}
+	{% set x, y, park_z_hop, z_hop_ramp, retract = vars.park_pause|default([-999,-999,0,0,0])|map('float') %}
+	{% elif operation in ['cancel'] %}
+	{% set x, y, park_z_hop, z_hop_ramp, retract = vars.park_cancel|default([-999,-999,0,0,0])|map('float') %}
+	{% elif operation in ['complete'] %}
+	{% set x, y, park_z_hop, z_hop_ramp, retract = vars.park_complete|default([-999,-999,0,0,0])|map('float') %}
+	{% else %}
+	{% set x = -999 %}
+	{% set y = -999 %}
+	{% set park_z_hop = 0 %}
+	{% set z_hop_ramp = 0 %}
+	{% set retract = 0 %}
+	{% endif %}
+	{% set park_z_hop = park_z_hop|abs %}
+	{% set z_hop_ramp = z_hop_ramp|abs %}
+	{% set min_toolchange_z = vars.min_toolchange_z|default(1)|float|abs %}
+	{% if x == -999 and y == -999 and park_z_hop == 0 %}
+	{% set min_toolchange_z = 0 %}
+	{% endif %}
+	{% set park_travel_speed = vars.park_travel_speed|default(200)|float * 60 %}
+	{% set park_lift_speed = vars.park_lift_speed|default(15)|float * 60 %}
+	{% set pos = printer.gcode_move.gcode_position %}
+	{% set origin = printer.gcode_move.homing_origin %}
+	{% set max = printer.toolhead.axis_maximum %}
+	
+	
+	{% set orig_x = pos.x %}
+	{% set orig_y = pos.y %}
+	{% set cx = (max.x - origin.x) / 2.0 %}
+	{% set cy = (max.y - origin.y) / 2.0 %}
+	{% if pos.x == cx and pos.y == cy %}
+	{% set target_x = 0 %}
+	{% set target_y = 0 %}
+	{% else %}
+	{% set target_x = cx %}
+	{% set target_y = cy %}
+	{% endif %}
+	{% set dx = target_x - pos.x %}
+	{% set dy = target_y - pos.y %}
+	{% set length = (dx * dx + dy * dy) ** 0.5 %}
+	{% set z_hop_x = pos.x + z_hop_ramp * dx / length %}
+	{% set z_hop_y = pos.y + z_hop_ramp * dy / length %}
+	
+	{% set starting_z = saved_xyz[2] if saved_pos else pos.z %}
+	{% set z_hop_floor = [starting_z, min_lifted_z]|max %}
+	{% set toolchange_z = [[z_hop_floor + park_z_hop, max.z - origin.z]|min, min_toolchange_z, toolchange_z]|max %}
+	
+	{% set should_park = force_park or (
+	operation in (
+	enable_park_disabled if not printer.mmu.enabled else
+	(enable_park_printing if is_printing else enable_park_standalone)
+	) and operation != park_operation
+	) %}
+	{% set should_ramp = (
+	should_park and pos.z == starting_z and
+	park_z_hop > 0 and z_hop_ramp > 0 and
+	operation not in ['load'] and is_printing
+	) %}
+	{% set should_retract = (
+	should_park and
+	retracted_length == 0 and retract > 0 and
+	operation not in ['load']
+	) %}
+	
+	{% if should_park %}
+	{% if should_retract %}
+	_MMU_RETRACT LENGTH={retract}
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=toolchange_z VALUE={toolchange_z}
+	{% set lift=" with ramping lift" if should_ramp else "" %}
+	MMU_LOG MSG="Parking toolhead at (x:{x|round(1) if x != -999 else "n/a"}, y:{y|round(1) if y != -999 else "n/a"}, z:{toolchange_z|round(1)}){lift} for {operation} operation"
+	{% if 'xy' not in printer.toolhead.homed_axes %}
+	MMU_LOG MSG="Cannot park because XY not homed"
+	{% else %}
+	G90
+	{% if 'z' not in printer.toolhead.homed_axes %}
+	MMU_LOG MSG="Skipping z_hop move because Z not homed"
+	{% else %}
+	{% if should_ramp %}
+	G1 X{z_hop_x} Y{z_hop_y} Z{toolchange_z} F{park_travel_speed}
+	G1 X{orig_x} Y{orig_y} Z{toolchange_z} F{park_travel_speed}
+	{% else %}
+	G1 Z{toolchange_z} F{park_lift_speed}
+	{% endif %}
+	{% endif %}
+	{% if vars.user_park_move_macro %}
+	{vars.user_park_move_macro} X={x} Y={y} F={park_travel_speed}
+	{% elif x != -999 and y != -999 %}
+	G1 X{x} Y{y} F{park_travel_speed}
+	{% elif x != -999 and y == -999 %}
+	G1 X{x} F{park_travel_speed}
+	{% elif x == -999 and y != -999 %}
+	G1 Y{y} F{park_travel_speed}
+	{% endif %}
+	{% endif %}
+	{% if not force_park %}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=park_operation VALUE=\"{operation}\"
+	{% endif %}
+	{% endif %}
+
+[gcode_macro _MMU_SAVE_POSITION]
+description = Record to toolhead position for return later
+gcode = 
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set pos = printer.gcode_move.gcode_position %}
+	{% set axis_minimum = printer.toolhead.axis_minimum %}
+	{% set axis_maximum = printer.toolhead.axis_maximum %}
+	{% set x = [axis_minimum.x, [axis_maximum.x, pos.x]|min]|max %}
+	{% set y = [axis_minimum.y, [axis_maximum.y, pos.y]|min]|max %}
+	
+	{% if not park_vars.saved_pos and 'xyz' in printer.toolhead.homed_axes %}
+	{% if x != pos.x or y != pos.y %}
+	MMU_LOG MSG="Warning: Klipper reported out of range gcode position (x:{pos.x}, y:{pos.y})! Adjusted to (x:{x}, y:{y}) to prevent move failure" ERROR=1
+	{% endif %}
+	MMU_LOG MSG="Saving toolhead position (x:{x|round(1)}, y:{y|round(1)}, z:{pos.z|round(1)})"
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=saved_xyz VALUE="{x}, {y}, {pos.z}"
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=saved_pos VALUE={True}
+	{% endif %}
+
+[gcode_macro _MMU_RESTORE_POSITION]
+description = Restore saved toolhead position
+gcode = 
+	{% set restore = params.RESTORE|default(1)|int %}
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set x,y,z = park_vars.saved_xyz|map('float') %}
+	{% set nx,ny = park_vars.next_xy|map('float') %}
+	{% set park_travel_speed = vars.park_travel_speed|default(200)|float * 60 %}
+	{% set park_lift_speed = vars.park_lift_speed|default(15)|float * 60 %}
+	{% set restore_xy_pos = vars.restore_xy_pos|default('last') %}
+	{% set is_printing = printer.mmu.print_state in ["started", "printing"] and not printer.pause_resume.is_paused %}
+	
+	{% set should_unretract = (
+	park_vars.retracted_length and
+	park_vars.park_operation not in ['unload', 'cancel', 'complete']
+	) %}
+	{% set should_restore_nextxy = (
+	park_vars.next_pos and
+	restore_xy_pos == 'next' and
+	park_vars.park_operation == 'toolchange'
+	) %}
+	{% set should_restore_xy = (
+	park_vars.saved_pos and
+	(restore_xy_pos != 'none' or park_vars.park_operation != 'toolchange')
+	) %}
+	
+	{% if restore %}
+	G90
+	{% if park_vars.toolchange_z > 0 and park_vars.saved_pos and 'z' in printer.toolhead.homed_axes %}
+	G1 Z{park_vars.toolchange_z} F{park_lift_speed}
+	{% endif %}
+	{% if should_restore_nextxy %}
+	{% if vars.user_park_move_macro %}
+	MMU_LOG MSG="Restoring toolhead position to next pos using {vars.user_park_move_macro} RESTORE=1 (x:{nx|round(1)}, y:{ny|round(1)})"
+	{vars.user_park_move_macro} RESTORE=1 X={nx} Y={ny} F={park_travel_speed}
+	{% else  %}
+	MMU_LOG MSG="Restoring toolhead position to next pos: (x:{nx|round(1)}, y:{ny|round(1)}, z:{z|round(1)})"
+	G1 X{nx} Y{ny} F{park_travel_speed}
+	{% endif %}
+	{% elif should_restore_xy %}
+	{% if vars.user_park_move_macro %}
+	MMU_LOG MSG="Restoring toolhead position to last pos using {vars.user_park_move_macro} RESTORE=1 (x:{x|round(1)}, y:{y|round(1)})"
+	{vars.user_park_move_macro} RESTORE=1 X={x} Y={y} F={park_travel_speed}
+	{% else %}
+	MMU_LOG MSG="Restoring toolhead position to last pos: (x:{x|round(1)}, y:{y|round(1)}, z:{z|round(1)})"
+	G1 X{x} Y{y} F{park_travel_speed}
+	{% endif %}
+	{% elif park_vars.saved_pos %}
+	MMU_LOG MSG="Restoring toolhead position to: (z:{z|round(1)})"
+	{% endif %}
+	{% if park_vars.saved_pos and 'z' in printer.toolhead.homed_axes %}
+	G1 Z{z} F{park_lift_speed}
+	{% endif %}
+	{% else %}
+	MMU_LOG MSG="Skipping restore of toolhead XYZ position"
+	{% endif %}
+	
+	{% if should_unretract %}
+	_MMU_UNRETRACT
+	{% endif %}
+	
+	_MMU_CLEAR_POSITION
+
+[gcode_macro _MMU_RETRACT]
+description = Helper to retract filament
+gcode = 
+	{% set sequence_vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set retracted_length = park_vars.retracted_length %}
+	{% set length = params.LENGTH|default(0)|float|abs %}
+	{% set speed = sequence_vars.retract_speed|int %}
+	{% set length = [length - retracted_length, 0] | max %}
+	
+	{% if printer.extruder.can_extrude %}
+	{% if length > 0 %}
+	MMU_LOG MSG="Retracting {length}mm"
+	M83
+	G1 E-{length} F{speed|abs * 60}
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=retracted_length VALUE={length}
+	{% else %}
+	MMU_LOG MSG="Extruder is not hot enough to retract" DEBUG=1
+	{% endif %}
+
+[gcode_macro _MMU_UNRETRACT]
+description = Helper to extruder filament to undo retract
+gcode = 
+	{% set sequence_vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set length = park_vars.retracted_length %}
+	{% set speed = sequence_vars.unretract_speed|int %}
+	
+	{% if printer.extruder.can_extrude %}
+	{% if length > 0 %}
+	MMU_LOG MSG="Un-retracting {length}mm"
+	M83
+	G1 E{length} F{speed|abs * 60}
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=retracted_length VALUE=0
+	{% else %}
+	MMU_LOG MSG="Extruder is not hot enough to un-retract" DEBUG=1
+	{% endif %}
+
+[gcode_macro _MMU_CLEAR_POSITION]
+description = Clear previously recorded toolhead position
+gcode = 
+	{% set reset = params.RESET|default(0)|int %}
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=saved_pos VALUE={False}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=next_pos VALUE={False}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=toolchange_z VALUE=-1
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=retracted_length VALUE=0
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=park_operation VALUE=\"\"
+	{% if reset %}
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=min_lifted_z VALUE=0
+	{% endif %}
+	MMU_LOG MSG="Clearing saved toolhead position{' and rising toolchange floor' if reset else ''}" DEBUG=1
+
+[gcode_macro _MMU_AUTO_HOME]
+description = Convenience auto homing primarily for testing
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set auto_home = vars.auto_home|default(true)|lower == 'true' %}
+	
+	{% if auto_home and 'xyz' not in printer.toolhead.homed_axes %}
+	MMU_LOG MSG="Automatically homing XYZ before parking toolhead"
+	G28
+	{% endif %}
+
+[gcode_macro MMU_UPDATE_HEIGHT]
+description = Record maximum toolhead height for z-hop base (call on layer change for sequential printing)
+gcode = 
+	{% set height = params.HEIGHT|default(0)|float %}
+	{% set park_vars = printer['gcode_macro _MMU_PARK'] %}
+	{% set max_z = [park_vars.min_lifted_z, printer.gcode_move.gcode_position.z, height]|max %}
+	
+	{% if max_z > park_vars.min_lifted_z %}
+	MMU_LOG MSG="Setting rising toolchange floor to {max_z}" DEBUG=1
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_PARK VARIABLE=min_lifted_z VALUE={max_z}
+
+[gcode_macro _MMU_PRE_UNLOAD]
+description = Optional pre unload routine for filament change
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set x, y, z_hop = vars.pre_unload_position|default([-999,-999,0])|map('float') %}
+	
+	{% if x != -999 or y != -999 or z_hop > 0 %}
+	_MMU_PARK FORCE_PARK=1 X={x} Y={y} Z_HOP={z_hop}
+	{% endif %}
+	{vars.user_pre_unload_extension|default("")}
+
+[gcode_macro _MMU_POST_FORM_TIP]
+description = Optional post tip forming/cutting routing
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set x, y, z_hop = vars.post_form_tip_position|default([-999,-999,0])|map('float') %}
+	
+	{% if x != -999 or y != -999 or z_hop > 0 %}
+	_MMU_PARK FORCE_PARK=1 X={x} Y={y} Z_HOP={z_hop}
+	{% endif %}
+	{vars.user_post_form_tip_extension|default("")}
+
+[gcode_macro _MMU_POST_UNLOAD]
+description = Optional post unload routine for filament change
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	
+	
+	
+	
+	{vars.user_post_unload_extension|default("")}
+
+[gcode_macro _MMU_PRE_LOAD]
+description = Optional pre load routine for filament change
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set x, y, z_hop = vars.pre_load_position|default([-999,-999,0])|map('float') %}
+	
+	{% if x != -999 or y != -999 or z_hop > 0 %}
+	_MMU_PARK FORCE_PARK=1 X={x} Y={y} Z_HOP={z_hop}
+	{% endif %}
+	{vars.user_pre_load_extension|default("")}
+
+[gcode_macro _MMU_POST_LOAD]
+description = Optional post load routine for filament change
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{% set timelapse = vars.timelapse|default(false)|lower == 'true' %}
+	
+	{% if timelapse %}
+	TIMELAPSE_TAKE_FRAME
+	{% endif %}
+	
+	
+	
+	{vars.user_post_load_extension|default("")}
+
+[gcode_macro _MMU_ERROR]
+description = Called when an MMU error occurs
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SEQUENCE_VARS'] %}
+	{vars.user_mmu_error_extension|default("")}
+
+[gcode_macro _MMU_LOAD_SEQUENCE]
+description = Called when MMU is asked to load filament
+gcode = 
+	{% set filament_pos = params.FILAMENT_POS|float %}
+	{% set length = params.LENGTH|float %}
+	{% set full = params.FULL|int %}
+	{% set home_extruder = params.HOME_EXTRUDER|int %}
+	{% set skip_extruder = params.SKIP_EXTRUDER|int %}
+	{% set extruder_only = params.EXTRUDER_ONLY|int %}
+	
+	{% if extruder_only %}
+	_MMU_STEP_LOAD_TOOLHEAD EXTRUDER_ONLY=1
+	
+	{% elif filament_pos >= 7 %}
+	{action_raise_error("Can't load - already in extruder!")}
+	
+	{% else %}
+	{% if filament_pos <= 0 %}
+	_MMU_STEP_LOAD_GATE
+	{% endif %}
+	
+	{% if filament_pos < 4 %}
+	_MMU_STEP_LOAD_BOWDEN LENGTH={length}
+	{% endif %}
+	
+	{% if filament_pos < 6 and home_extruder %}
+	_MMU_STEP_HOME_EXTRUDER
+	{% endif %}
+	
+	{% if not skip_extruder %}
+	_MMU_STEP_LOAD_TOOLHEAD
+	{% endif %}
+	
+	{% endif %}
+
+[gcode_macro _MMU_UNLOAD_SEQUENCE]
+description = Called when MMU is asked to unload filament
+gcode = 
+	{% set filament_pos = params.FILAMENT_POS|float %}
+	{% set length = params.LENGTH|float %}
+	{% set extruder_only = params.EXTRUDER_ONLY|int %}
+	{% set park_pos = params.PARK_POS|float %}
+	
+	{% if extruder_only %}
+	{% if filament_pos >= 7 %}
+	_MMU_STEP_UNLOAD_TOOLHEAD EXTRUDER_ONLY=1 PARK_POS={park_pos}
+	{% else %}
+	{action_raise_error("Can't unload extruder - already unloaded!")}
+	{% endif %}
+	
+	{% elif filament_pos == 0 %}
+	{action_raise_error("Can't unload - already unloaded!")}
+	
+	{% else %}
+	{% if filament_pos >= 7 %}
+	
+	_MMU_STEP_UNLOAD_TOOLHEAD PARK_POS={park_pos}
+	{% endif %}
+	
+	{% if filament_pos >= 4 %}
+	
+	_MMU_STEP_UNLOAD_BOWDEN FULL=1
+	_MMU_STEP_UNLOAD_GATE
+	
+	{% elif filament_pos >= 2 %}
+	
+	_MMU_STEP_UNLOAD_GATE FULL=1
+	{% endif %}
+	
+	{% endif %}
+
+[gcode_macro MMU_START_SETUP]
+description = Called when starting print to setup MMU
+gcode = 
+	{% set initial_tool = params.INITIAL_TOOL|default(0)|int %}
+	{% set total_toolchanges = params.TOTAL_TOOLCHANGES|default(0)|int %}
+	{% set ttg_map = printer.mmu.ttg_map %}
+	{% set gate_fil_names = printer.mmu.gate_filament_name %}
+	{% set gate_colors = printer.mmu.gate_color %}
+	{% set num_gates = ttg_map|length %}
+	{% set referenced_tools = (params.REFERENCED_TOOLS|default("!referenced_tools!")|string).split(",")
+	if (params.REFERENCED_TOOLS and params.REFERENCED_TOOLS != "")
+	else [] %}
+	{% set tool_colors = (params.TOOL_COLORS|default("")|string).split(",")
+	if (params.TOOL_COLORS and params.TOOL_COLORS != "!colors!" and params.TOOL_COLORS != "")
+	else ['000000'] * num_gates %}
+	{% set tool_temps = (params.TOOL_TEMPS|default("")|string).split(",")
+	if (params.TOOL_TEMPS and params.TOOL_TEMPS != "!temperatures!" and params.TOOL_TEMPS != "")
+	else ['0'] * num_gates %}
+	{% set tool_materials = (params.TOOL_MATERIALS|default("")|string).split(",")
+	if (params.TOOL_MATERIALS and params.TOOL_MATERIALS != "!materials!" and params.TOOL_MATERIALS != "")
+	else ['unknown'] * num_gates %}
+	{% set filament_names = (params.FILAMENT_NAMES|default("")|string).split(",")
+	if (params.FILAMENT_NAMES and params.FILAMENT_NAMES != "!filament_names!" and params.FILAMENT_NAMES != "")
+	else [''] * num_gates %}
+	{% set purge_volumes = (params.PURGE_VOLUMES|default("")|string)
+	if (params.PURGE_VOLUMES and params.PURGE_VOLUMES != "!purge_volumes!" and params.PURGE_VOLUMES != "")
+	else "" %}
+	
+	{% set vars = printer['gcode_macro _MMU_SOFTWARE_VARS'] %}
+	{% set home_mmu = vars.home_mmu|lower == 'true' %}
+	
+	{% set filament_loaded = printer.mmu.filament_pos == 10 %}
+	{% set using_bypass = printer.mmu.tool == -2 %}
+	{% set num_colors = referenced_tools|length %}
+	
+	{% if printer.mmu.enabled %}
+	
+	
+	MMU_PRINT_START
+	
+	
+	{% if not vars.user_pre_initialize_extension == "" %}
+	{vars.user_pre_initialize_extension}
+	{% endif %}
+	
+	
+	{% if referenced_tools == ['!referenced_tools!'] %}
+	MMU_LOG MSG="Happy Hare gcode pre-processor is probably disabled or not setup correctly"
+	{% set referenced_tools = [] %}
+	{% set num_colors = -1 %}
+	{% elif referenced_tools == [] %}
+	{% set num_colors = 1 %}
+	{% endif %}
+	
+	
+	{% set num_slicer_tools = tool_colors|length %}
+	{% if not using_bypass %}
+	{% if tool_colors|length != tool_temps|length or tool_colors|length != tool_materials|length or tool_colors|length != filament_names|length %}
+	MMU_LOG MSG="Warning: Slicer defined extruder attributes have different lengths. Possibly an issue with parsing slicer information or missing parameters to MMU_START_SETUP"
+	MMU_LOG MSG="  TOOL_COLORS={tool_colors}"
+	MMU_LOG MSG="  TOOL_TEMPS={tool_temps}"
+	MMU_LOG MSG="  TOOL_MATERIALS={tool_materials}"
+	MMU_LOG MSG="  FILAMENT_NAMES={filament_names}"
+	{% endif %}
+	{% if tool_colors|length != num_gates or tool_temps|length != num_gates or tool_materials|length != num_gates or filament_names|length != num_gates %}
+	{% if vars.automap_strategy != 'none' %}
+	MMU_LOG MSG="Warning: Looks like slicer is setup with {num_slicer_tools} extruders but your MMU has {num_gates} gates! Probably using auto-map feature."
+	{% else %}
+	MMU_LOG MSG="Warning: Looks like slicer is setup with {num_slicer_tools} extruders but your MMU has {num_gates} gates! These should match but will attempt to continue"
+	{% endif %}
+	{% endif %}
+	{% endif %}
+	
+	
+	MMU_SLICER_TOOL_MAP RESET=1 PURGE_VOLUMES={purge_volumes} NUM_SLICER_TOOLS={num_slicer_tools} INITIAL_TOOL={initial_tool} TOTAL_TOOLCHANGES={total_toolchanges}
+	{% if using_bypass %}
+	MMU_SLICER_TOOL_MAP SKIP_AUTOMAP=1
+	{% endif %}
+	{% for t in range(num_slicer_tools) %}
+	MMU_SLICER_TOOL_MAP TOOL={t} TEMP={tool_temps[t]} MATERIAL='{tool_materials[t]}' COLOR={tool_colors[t]} NAME='{filament_names[t]}' {"USED=0" if t|string not in referenced_tools and t != initial_tool else ""} QUIET=1 AUTOMAP={vars.automap_strategy}
+	{% endfor %}
+	
+	
+	{% set custom_msg = [] %}
+	{% set m = [] %}
+	{% for tool in referenced_tools %}
+	{% set _ = m.append("T" + tool|string + " (Gate" + ttg_map[tool|int]|string + ")") %}
+	{% endfor %}
+	{% set line = "Initial Tool: T%s" % initial_tool %}
+	{% set _ = m.append(line) %}
+	{% set _ = custom_msg.append("Print requires tools: %s" % ", ".join(m)) %}
+	{% set _ = custom_msg.append("Manually ensure that T" + initial_tool|string + " is loaded and all other tools available before resuming print") %}
+	
+	
+	{% if num_colors > 1 %}
+	MMU_SLICER_TOOL_MAP SPARSE_PURGE_MAP=1 NUM_SLICER_TOOLS={num_slicer_tools}
+	{% else %}
+	MMU_SLICER_TOOL_MAP
+	{% endif %}
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_ERROR_DIALOG VARIABLE=show_abort VALUE={True}
+	{% if using_bypass and filament_loaded %}
+	MMU_LOG MSG="MMU Bypass selected and loaded"
+	{% if num_colors > 1 %}
+	SET_GCODE_VARIABLE MACRO=_MMU_ERROR_DIALOG VARIABLE=custom_msg VALUE="{custom_msg}"
+	MMU_PAUSE MSG="Bypass selected for multi-color print"
+	{% endif %}
+	{% else %}
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_ERROR_DIALOG VARIABLE=custom_msg VALUE="{custom_msg}"
+	{% if home_mmu %}
+	{% if not filament_loaded %}
+	MMU_HOME TOOL={initial_tool}
+	{% else %}
+	MMU_LOG MSG="Skipping homing MMU because filament is already loaded"
+	{% endif %}
+	{% endif %}
+	{% endif %}
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_setup_run VALUE={True}
+
+[gcode_macro MMU_START_CHECK]
+description = Helper macro. Can be called to perform pre-start checks on MMU based on slicer requirements
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SOFTWARE_VARS'] %}
+	{% set check_gates = vars.check_gates|lower == 'true' %}
+	{% set using_bypass = printer.mmu.tool == -2 %}
+	
+	{% if printer.mmu.enabled %}
+	{% set slicer_tool_map = printer.mmu.slicer_tool_map %}
+	{% set initial_tool = slicer_tool_map.initial_tool %}
+	{% set tools = slicer_tool_map.referenced_tools %}
+	{% if not using_bypass %}
+	
+	
+	{% if check_gates and tools|length > 0 %}
+	
+	MMU_LOG MSG="Checking all required gates have filament loaded..."
+	{% if not printer.mmu.is_homed %}
+	MMU_HOME
+	{% endif %}
+	MMU_CHECK_GATE TOOLS={tools|join(",")}
+	{% endif %}
+	{% endif %}
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_check_run VALUE={True}
+
+[gcode_macro MMU_START_LOAD_INITIAL_TOOL]
+description = Helper to load initial tool if not paused
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_SOFTWARE_VARS'] %}
+	{% set load_initial_tool = vars.load_initial_tool|lower == 'true' %}
+	{% set using_bypass = printer.mmu.tool == -2 %}
+	{% set filament_loaded = printer.mmu.filament_pos == 10 %}
+	{% set slicer_tool_map = printer.mmu.slicer_tool_map %}
+	{% set initial_tool = slicer_tool_map.initial_tool %}
+	{% set tools = slicer_tool_map.referenced_tools %}
+	
+	{% if printer.mmu.enabled %}
+	{% if not using_bypass and tools|length > 0 %}
+	{% if load_initial_tool and (initial_tool is not none and initial_tool >= 0) %}
+	MMU_LOG MSG="Loading initial tool T{initial_tool}..."
+	MMU_CHANGE_TOOL STANDALONE=1 RESTORE=0 TOOL={initial_tool}
+	{% endif %}
+	{% elif not filament_loaded %}
+	MMU_PAUSE MSG="Load bypass or initial tool before resuming print"
+	{% else %}
+	MMU_LOG MSG="Using bypass"
+	{% endif %}
+	{% endif %}
+	
+	
+	SET_GCODE_VARIABLE MACRO=_MMU_ERROR_DIALOG VARIABLE=custom_msg VALUE='""'
+	SET_GCODE_VARIABLE MACRO=_MMU_ERROR_DIALOG VARIABLE=show_abort VALUE={False}
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_load_initial_tool_run VALUE={True}
+
+[gcode_macro MMU_END]
+description = Called when ending print to finalize MMU
+gcode = 
+	{% set unload = params.UNLOAD|default(0)|int %}
+	{% set vars = printer['gcode_macro _MMU_SOFTWARE_VARS'] %}
+	{% set unload_tool = vars.unload_tool|lower == 'true' %}
+	{% set reset_ttg = vars.reset_ttg|lower == 'true' %}
+	{% set dump_stats = vars.dump_stats|lower == 'true' %}
+	{% set slicer_tool_map = printer.mmu.slicer_tool_map %}
+	{% set tools = slicer_tool_map.referenced_tools %}
+	{% set using_bypass = printer.mmu.tool == -2 %}
+	
+	{% if printer.mmu.enabled %}
+	{% if not vars.user_print_end_extension == "" %}
+	{vars.user_print_end_extension}
+	{% endif %}
+	
+	{% if unload or unload_tool %}
+	MMU_LOG MSG="Unloading filament on print end"
+	MMU_UNLOAD RESTORE=0
+	{% endif %}
+	
+	{% if reset_ttg %}
+	MMU_TTG_MAP RESET=1 QUIET=1
+	{% endif %}
+	
+	{% if dump_stats and not using_bypass and tools|length > 0 %}
+	MMU_STATS
+	{% endif %}
+	
+	
+	MMU_PRINT_END STATE=complete
+	{% endif %}
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_end_run VALUE={True}
+
+[gcode_macro MMU_COLD_PULL]
+description = Guide you through the process of cleaning your extruder with a cold pull
+gcode = 
+	{% set material = params.MATERIAL|default("pla")|string|upper %}
+	{% set materials = {
+	'NYLON': {'hot_temp': 260, 'cold_temp': 50, 'pull_temp': 120, 'min_extrude_temp': 190},
+	'PLA':   {'hot_temp': 250, 'cold_temp': 45, 'pull_temp': 100, 'min_extrude_temp': 160},
+	'ABS':   {'hot_temp': 255, 'cold_temp': 50, 'pull_temp': 120, 'min_extrude_temp': 190},
+	'PETG':  {'hot_temp': 250, 'cold_temp': 45, 'pull_temp': 100, 'min_extrude_temp': 180}
+	} %}
+	{% if material not in materials %}
+	{action_raise_error("Unknown material. Valid types are: Nylon, ABS, PLA, PETG")}
+	{% endif %}
+	
+	
+	{% set hot_temp = params.HOT_TEMP|default('')|int %}
+	{% set cold_temp = params.COLD_TEMP|default('')|int %}
+	{% set pull_temp = params.PULL_TEMP|default('')|int %}
+	{% set min_extrude_temp = params.MIN_EXTRUDE_TEMP|default('')|int %}
+	{% set hot_temp = (hot_temp if hot_temp > 0 else materials.get(material).hot_temp)|int %}
+	{% set cold_temp = (cold_temp if cold_temp > 0 else materials.get(material).cold_temp)|int %}
+	{% set pull_temp = (pull_temp if pull_temp > 0 else materials.get(material).pull_temp)|int %}
+	{% set min_extrude_temp = (min_extrude_temp if min_extrude_temp > 0 else materials.get(material).min_extrude_temp)|int %}
+	
+	{% set pull_speed = params.PULL_SPEED|default(10)|int %}
+	{% set clean_length = params.CLEAN_LENGTH|default(25)|int %}
+	{% set extrude_speed = params.EXTRUDE_SPEED|default(1.5)|float %}
+	
+	{% set ns = namespace(stuff_points=[], cool_points=[]) %}
+	
+	{% for temp in range(hot_temp + 1, cold_temp - 1, -1) %}
+	{% if temp % 10 == 0 %}
+	{% if temp > min_extrude_temp %}
+	{% set ns.stuff_points = ns.stuff_points + [temp] %}
+	{% elif temp < min_extrude_temp %}
+	{% set ns.cool_points = ns.cool_points + [temp] %}
+	{% endif %}
+	{% endif %}
+	{% endfor %}
+	
+	MMU_LOG MSG='{"Cold Pull based on %s profile (use MATERIAL= to adjust):" % material}'
+	MMU_LOG MSG='{"pull_temp=%d\u00B0C, hot_temp=%d\u00B0C, min_extruder=%d\u00B0C, cold_temp=%d\u00B0C" % (pull_temp, hot_temp, min_extrude_temp, cold_temp)}'
+	
+	MMU_LOG MSG='{"Heating extruder to %d\u00B0C..." % hot_temp}'
+	SET_HEATER_TEMPERATURE HEATER="extruder" TARGET={hot_temp}
+	TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={hot_temp - 2} MAXIMUM={hot_temp + 2}
+	
+	
+	MMU_LOG MSG="Cleaning nozzle tip with {clean_length}mm of filament"
+	_MMU_STEP_MOVE MOTOR="extruder" MOVE={clean_length} SPEED={extrude_speed} ALLOW_BYPASS=1
+	
+	
+	MMU_LOG MSG="Allowing extruder to cool..."
+	SET_HEATER_TEMPERATURE HEATER="extruder" TARGET={cold_temp}
+	M106 S255
+	
+	
+	{% for temp in ns.stuff_points %}
+	TEMPERATURE_WAIT SENSOR="extruder" MAXIMUM={temp}
+	MMU_LOG MSG='{"> Stuffing nozzle at %d\u00B0C" % temp}'
+	_MMU_STEP_MOVE MOTOR="extruder" MOVE=1 SPEED={extrude_speed} ALLOW_BYPASS=1
+	{% endfor %}
+	
+	
+	MMU_LOG MSG='{"Waiting for extruder to completely cool to %d\u00B0C..." % cold_temp}'
+	{% for temp in ns.cool_points %}
+	TEMPERATURE_WAIT SENSOR="extruder" MAXIMUM={temp}
+	MMU_LOG MSG='{"> Nozzle at %d\u00B0C" % temp}'
+	{% endfor %}
+	TEMPERATURE_WAIT SENSOR="extruder" MAXIMUM={cold_temp}
+	
+	
+	M107
+	MMU_LOG MSG='{"Re-warming extruder to %d\u00B0C" % pull_temp}'
+	SET_HEATER_TEMPERATURE HEATER="extruder" TARGET={pull_temp}
+	
+	
+	TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={pull_temp - 10}
+	MMU_LOG MSG="Get ready to pull..."
+	TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={pull_temp}
+	MMU_LOG MSG=">>>>> PULL NOW <<<<<"
+	
+	
+	_MMU_STEP_MOVE MOTOR="extruder" MOVE=-150 SPEED={pull_speed} ALLOW_BYPASS=1
+	
+	MMU_LOG MSG="Cold pull is successful if you can see the shape of the nozzle at the filament end"
+	MMU_LOG MSG="If not, try again, perhaps with tweaked temperatures"
+	
+	
+	SET_HEATER_TEMPERATURE HEATER="extruder"
+
+[gcode_macro _MMU_ERROR_DIALOG]
+description = Helper to display pause dialog
+variable_custom_msg = ''
+variable_show_abort = False
+gcode = 
+	{% set message = params.MSG|string %}
+	{% set reason = params.REASON|string %}
+	RESPOND TYPE=command MSG="action:prompt_begin Happy Hare Error Notice"
+	RESPOND TYPE=command MSG='{"action:prompt_text %s" % message}'
+	RESPOND TYPE=command MSG='{"action:prompt_text Reason: %s" % reason}'
+	{% if not custom_msg == "" %}
+	{% for line in custom_msg %}
+	RESPOND TYPE=command MSG='{"action:prompt_text %s" % line}'
+	{% endfor %}
+	{% else %}
+	RESPOND TYPE=command MSG="action:prompt_text After fixing, call RESUME to continue printing (MMU_UNLOCK to restore temperature)"
+	{% endif %}
+	RESPOND TYPE=command MSG="action:prompt_button_group_start"
+	{% if show_abort %}
+	RESPOND TYPE=command MSG="action:prompt_button ABORT|CANCEL_PRINT|error"
+	{% endif %}
+	RESPOND TYPE=command MSG="action:prompt_button UNLOCK|MMU_UNLOCK|secondary"
+	RESPOND TYPE=command MSG="action:prompt_button RESUME|RESUME|warning"
+	RESPOND TYPE=command MSG="action:prompt_button_group_end"
+	RESPOND TYPE=command MSG="action:prompt_show"
+	{% set custom_msg = "" %}
+
+[gcode_macro _MMU_RUN_MARKERS]
+variable_mmu_start_setup_run = False
+variable_mmu_start_check_run = False
+variable_mmu_start_load_initial_tool_run = False
+variable_mmu_end_run = False
+gcode = 
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_setup_run VALUE=False
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_check_run VALUE=False
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_start_load_initial_tool_run VALUE=False
+	SET_GCODE_VARIABLE MACRO=_MMU_RUN_MARKERS VARIABLE=mmu_end_run VALUE=False
+
+[gcode_macro MMU__UNLOAD]
+gcode = MMU_UNLOAD
+
+[gcode_macro MMU__EJECT]
+gcode = MMU_EJECT
+
+[gcode_macro MMU__HOME]
+gcode = 
+	{% set tool = params.TOOL|default(0)|int %}
+	{% set force_unload = params.FORCE_UNLOAD|default(0)|int %}
+	MMU_HOME TOOL={tool} FORCE_UNLOAD={force_unload}
+
+[gcode_macro MMU__STATUS]
+gcode = MMU_STATUS
+
+[gcode_macro MMU__MOTORS_OFF]
+gcode = MMU_MOTORS_OFF
+
+[gcode_macro MMU__SERVO]
+gcode = 
+	{% set pos = params.POS|default("up")|string %}
+	MMU_SERVO POS={pos}
+
+[gcode_macro MMU__SELECT_TOOL]
+gcode = 
+	{% set tool = params.TOOL|default(0)|int %}
+	MMU_SELECT TOOL={tool}
+
+[gcode_macro MMU__SELECT_BYPASS]
+gcode = MMU_SELECT_BYPASS
+
+[gcode_macro MMU__LOAD_BYPASS]
+gcode = MMU_LOAD
+
+[gcode_macro MMU__RECOVER]
+gcode = MMU_RECOVER
+
+[gcode_macro MMU__PRELOAD]
+gcode = 
+	MMU_PRELOAD {rawparams}
+
+[gcode_macro MMU__CHECK_GATE]
+gcode = 
+	{% set gate = params.GATE|default(-1)|int %}
+	{% set tool = params.GATE|default(-1)|int %}
+	{% set gates = params.GATE|default('!')|string %}
+	{% set tools = params.GATE|default('!')|string %}
+	MMU_CHECK_GATE GATE={gate} TOOL={tool} GATES={gates} TOOLS={tools}
+
+[gcode_macro MMU_QUERY_PSENSOR]
+description = "Show raw and scaled readings for proportional (sync_feedback_analog_*) sensor"
+variable_sensor = "filament_proportional"
+gcode = 
+	{% set name = params.SENSOR|default(sensor) %}
+	{% set obj  = printer[name] %}
+	M118 PSENSOR Enabled: {obj.enabled}  Value: {obj.value|float|round(3)}  Raw Value: {obj.value_raw|float|round(3)}
+
+[gcode_macro MMU_CHANGE_TOOL_STANDALONE]
+description = Convenience macro for inclusion in print_start for initial tool load
+gcode = 
+	MMU_CHANGE_TOOL {rawparams} STANDALONE=1
+
+[gcode_macro MMU_CHECK_GATES]
+description = Alias for updated macro name of MMU_CHECK_GATE
+gcode = 
+	MMU_CHECK_GATE ALL=1
+
+[gcode_macro MMU_REMAP_TTG]
+description = Alias for updated macro name of MMU_TTG_MAP
+gcode = 
+	MMU_TTG_MAP {rawparams}
+
+[gcode_macro MMU_FORM_TIP]
+description = Alias for updated macro name of MMU_TEST_FORM_TIP
+gcode = 
+	MMU_TEST_FORM_TIP {rawparams}
+
+[gcode_macro _MMU_PRINT_START]
+description = Alias for updated macro name of MMU_PRINT_START
+gcode = 
+	MMU_PRINT_START {rawparams}
+
+[gcode_macro _MMU_PRINT_END]
+description = Alias for updated macro name of MMU_PRINT_END
+gcode = 
+	MMU_PRINT_END {rawparams}
+
+[gcode_macro _MMU_UPDATE_HEIGHT]
+description = Alias for updated macro name of MMU_UPDATE_HEIGHT
+gcode = 
+	MMU_UPDATE_HEIGHT {rawparams}
+
+[gcode_macro _MMU_ACTION_CHANGED]
+description = Called when an action has changed
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_STATE_VARS'] %}
+	{% set action = params.ACTION|string %}
+	{% set old_action = params.OLD_ACTION|string %}
+	
+	{% if not vars.user_action_changed_extension == "" %}
+	{vars.user_action_changed_extension} {rawparams}
+	{% endif %}
+
+[gcode_macro _MMU_PRINT_STATE_CHANGED]
+description = Called when print state changes
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_STATE_VARS'] %}
+	{% set state = params.STATE|string %}
+	{% set old_state = params.OLD_STATE|string %}
+	
+	{% if not vars.user_print_state_changed_extension == "" %}
+	{vars.user_print_state_changed_extension} {rawparams}
+	{% endif %}
+
+[gcode_macro _MMU_EVENT]
+description = Called when certain MMU actions occur
+gcode = 
+	{% set vars = printer['gcode_macro _MMU_STATE_VARS'] %}
+	{% set servo_down_limit = vars.servo_down_limit|default(-1)|int %}
+	{% set cutter_blade_limit = vars.cutter_blade_limit|default(-1)|int %}
+	{% set event = params.EVENT|string %}
+	
+	{% if event == "restart" %}
+	MMU_STATS COUNTER=mmu_restarts INCR=1
+	
+	{% set vendor = printer.configfile.config.mmu_machine.mmu_vendor|string|lower %}
+	{% set version = printer.configfile.config.mmu_machine.mmu_version|string|lower %}
+	{% if vendor == "ercf" %}
+	MMU_STATS COUNTER=servo_down LIMIT={servo_down_limit} WARNING="Inspect servo arm for wear/damage"
+	MMU_STATS COUNTER=cutter_blade LIMIT={cutter_blade_limit} WARNING="Inspect/replace filament cutting blade"
+	{% elif vendor == "tradrack" %}
+	MMU_STATS COUNTER=servo_down LIMIT={servo_down_limit} WARNING="Inspect servo mechanism for wear/damage"
+	MMU_STATS COUNTER=cutter_blade LIMIT={cutter_blade_limit} WARNING="Inspect/replace filament cutting blade"
+	{% endif %}
+	
+	{% elif event == "gate_map_changed" %}
+	{% elif event == "filament_gripped" %}
+	MMU_STATS COUNTER=servo_down INCR=1
+	{% elif event == "filament_cut" %}
+	MMU_STATS COUNTER=cutter_blade INCR=1
+	{% endif %}
+	
+	{% if not vars.user_mmu_event_extension == "" %}
+	{vars.user_mmu_event_extension} {rawparams}
+	{% endif %}
+
+[gcode_macro _YAMMU_SELECT_TOOL]
+description = "Selects the specified tool/gate on YAMMU"
+variable_select_angle = [0, 180, 0, 180, 0, 180, 0, 180]
+variable_rest_angle = [90, 90, 90, 90, 90, 90, 90, 90]
+gcode = 
+	{% set GATE  = params.GATE|int %}
+	
+	{% set PREFIX = "MMU_SERVO_" %}
+	{% set SELECTED_SERVO = (GATE // 2) %}
+	{% set OLD_GATE = printer.mmu.gate_selected %}
+	
+	{% if OLD_GATE != GATE %}
+	{% for i in range(3) %}
+	{% set SERVO = PREFIX ~ i %}
+	
+	{% if SELECTED_SERVO == i %}
+	RESPOND MSG="SET_SERVO SERVO={SERVO} ANGLE={select_angle[GATE]}"
+	SET_SERVO SERVO={SERVO} ANGLE={select_angle[GATE]}
+	{% else %}
+	RESPOND MSG="SET_SERVO SERVO={SERVO} ANGLE={rest_angle[i]}"
+	SET_SERVO SERVO={SERVO} ANGLE={rest_angle[i]}
+	{% endif %}
+	{% endfor %}
+	
+	{% else %}
+	{% set SERVO = PREFIX ~ SELECTED_SERVO %}
+	RESPOND MSG="SET_SERVO SERVO={SERVO} ANGLE={select_angle[GATE]}"
+	SET_SERVO SERVO={SERVO} ANGLE={select_angle[GATE]}
+	
+	{% endif %}
+
+[gcode_macro _YAMMU_FORM_TIP]
+description = Standalone macro that mimics Superslicer process
+gcode = 
+	{% set OLD_GATE = printer.mmu.gate_selected %}
+	MMU_SYNC_GEAR_MOTOR SYNC=0
+	_YAMMU_SELECT_TOOL GATE=-1
+	
+	_MMU_FORM_TIP
+	
+	MMU_SYNC_GEAR_MOTOR SYNC=1
+	_YAMMU_SELECT_TOOL GATE={OLD_GATE}
+
+[force_move]
+enable_force_move = True
+
+[mcu]
+serial = /dev/serial/by-id/usb-Klipper_rp2040_45503571290ACEF8-if00
+restart_method = command
+
+[printer]
+kinematics = none
+max_velocity = 500
+max_accel = 3000
+
+[tmc2209 extruder]
+uart_pin = gpio9
+tx_pin = gpio8
+uart_address = 3
+run_current = 1.200
+hold_current = 0.010
+stealthchop_threshold = 999999
+
+[heater_bed]
+heater_pin = gpio21
+sensor_type = Generic 3950
+sensor_pin = gpio27
+min_temp = -200
+max_temp = 200
+control = pid
+pid_kp = 26.936
+pid_ki = 2.088
+pid_kd = 86.868
+
+[verify_heater heater_bed]
+heating_gain = 0.5
+hysteresis = 10
+
+[fan_generic fan1]
+pin = gpio17
+
+[fan_generic fan2]
+pin = gpio18
+
+[heater_fan controller_fan]
+pin = gpio20
+heater = heater_bed
+heater_temp = 25.0
+
+[neopixel board_rgb]
+pin = gpio24
+chain_count = 1
+color_order = GRB
+initial_red = 0.3
+initial_green = 0.3
+initial_blue = 0.3
+
+[idle_timeout]
+timeout = 600
+gcode = 
+	RESPOND MSG="Fake idle timeout"
+
+[delayed_gcode startup]
+initial_duration = 1
+gcode = 
+	SET_KINEMATIC_POSITION X=150 Y=150 Z=25 SET_HOMED=XYZ
+	MMU_TEST_CONFIG LOG_LEVEL=4
+	MMU_SELECT GATE=0
+=======================
+MMU: Created: led unit0_mmu_exit_leds
+MMU: Created: led unit0_mmu_entry_leds
+MMU: Created: led unit0_mmu_status_leds
+MMU: Created: led unit0_mmu_logo_leds
+MMU: Created: mmu_leds unit0
+MMU: Created: _led_effect unit0_mmu_breathing_red_exit on unit0_mmu_exit_leds
+MMU: Created: _led_effect mmu_breathing_red_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_breathing_red_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_breathing_red_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_breathing_red_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect unit0_mmu_white_slow_exit on unit0_mmu_exit_leds
+MMU: Created: _led_effect unit0_mmu_white_fast_exit on unit0_mmu_exit_leds
+MMU: Created: _led_effect mmu_blue_clockwise_slow_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_blue_clockwise_slow_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_blue_clockwise_slow_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_blue_clockwise_slow_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_blue_clockwise_fast_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_blue_clockwise_fast_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_blue_clockwise_fast_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_blue_clockwise_fast_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_blue_anticlock_slow_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_blue_anticlock_slow_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_blue_anticlock_slow_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_blue_anticlock_slow_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_blue_anticlock_fast_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_blue_anticlock_fast_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_blue_anticlock_fast_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_blue_anticlock_fast_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect unit0_mmu_strobe_exit on unit0_mmu_exit_leds
+MMU: Created: _led_effect mmu_strobe_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_strobe_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_strobe_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_strobe_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_static_green_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_static_green_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_static_green_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_static_green_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_ready_green_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_ready_green_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_ready_green_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_ready_green_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_static_orange_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_static_orange_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_static_orange_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_static_orange_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_ready_orange_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_ready_orange_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_ready_orange_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_ready_orange_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_ready_orange2_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_ready_orange2_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_ready_orange2_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_ready_orange2_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_static_blue_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_static_blue_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_static_blue_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_static_blue_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_ready_blue_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_ready_blue_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_ready_blue_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_ready_blue_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect mmu_static_black_exit_0 on unit0_mmu_exit_leds (1-2)
+MMU: Created: _led_effect mmu_static_black_exit_1 on unit0_mmu_exit_leds (3-4)
+MMU: Created: _led_effect mmu_static_black_exit_2 on unit0_mmu_exit_leds (5-6)
+MMU: Created: _led_effect mmu_static_black_exit_3 on unit0_mmu_exit_leds (7-8)
+MMU: Created: _led_effect unit0_mmu_rainbow_exit on unit0_mmu_exit_leds
+MMU: Created: _led_effect unit0_mmu_sparkle_exit on unit0_mmu_exit_leds
+MMU: Hardware Initialization -------------------------------
+MMU: Setting up mmu stepper stepper_mmu_gear
+MMU: Filament sensor mmu_pre_gate_0 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_1 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_2 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_3 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_4 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_5 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_6 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_7 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_8 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_9 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_pre_gate_10 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_0 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_1 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_2 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_3 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_4 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_5 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_6 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_7 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_8 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_9 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_10 is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gate is not defined in [mmu_sensors]
+MMU: Filament sensor filament_tension is not defined in [mmu_sensors]
+MMU: Filament sensor filament_compression is not defined in [mmu_sensors]
+MMU: Filament sensor unit_0_filament_compression is not defined in [mmu_sensors]
+MMU: Filament sensor unit_0_filament_tension is not defined in [mmu_sensors]
+MMU: Filament sensor unit_1_filament_compression is not defined in [mmu_sensors]
+MMU: Filament sensor unit_1_filament_tension is not defined in [mmu_sensors]
+MMU: Filament sensor unit_2_filament_compression is not defined in [mmu_sensors]
+MMU: Filament sensor unit_2_filament_tension is not defined in [mmu_sensors]
+MMU: Filament sensor mmu_gear_touch is not defined in [mmu_sensors]
+MMU: No [mmu_encoder] definition found in mmu_hardware.cfg. Assuming encoder is not available
+Extruder max_extrude_ratio=0.831503
+mcu 'mcu': Starting serial connect
+webhooks client 140733729592656: New connection
+webhooks client 140733729592656: Client info {'program': 'Moonraker', 'version': 'v0.9.3-131-gb3f9566'}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2429799744, 'value': 32658, '#name': 'analog_in_state', '#sent_time': 227670.088534816, '#receive_time': 227670.100353001}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2430399744, 'value': 32658, '#name': 'analog_in_state', '#sent_time': 227670.13952252, '#receive_time': 227670.150344723}
+Loaded MCU 'mcu' 106 commands (v0.12.0-102-g9f41f53c / gcc: (15:8-2019-q3-1+b1) 8.3.1 20190703 (release) [gcc-8-branch revision 273027] binutils: (2.35.2-2+14+b2) 2.35.2)
+MCU 'mcu' config: ADC_MAX=4095 BUS_PINS_i2c0a=gpio0,gpio1 BUS_PINS_i2c0b=gpio4,gpio5 BUS_PINS_i2c0c=gpio8,gpio9 BUS_PINS_i2c0d=gpio12,gpio13 BUS_PINS_i2c0e=gpio16,gpio17 BUS_PINS_i2c0f=gpio20,gpio21 BUS_PINS_i2c0g=gpio24,gpio25 BUS_PINS_i2c0h=gpio28,gpio29 BUS_PINS_i2c1a=gpio2,gpio3 BUS_PINS_i2c1b=gpio6,gpio7 BUS_PINS_i2c1c=gpio10,gpio11 BUS_PINS_i2c1d=gpio14,gpio15 BUS_PINS_i2c1e=gpio18,gpio19 BUS_PINS_i2c1f=gpio22,gpio23 BUS_PINS_i2c1g=gpio26,gpio27 BUS_PINS_spi0a=gpio0,gpio3,gpio2 BUS_PINS_spi0b=gpio4,gpio7,gpio6 BUS_PINS_spi0c=gpio16,gpio19,gpio18 BUS_PINS_spi0d=gpio20,gpio23,gpio22 BUS_PINS_spi1a=gpio8,gpio11,gpio10 BUS_PINS_spi1b=gpio12,gpio15,gpio14 BUS_PINS_spi1c=gpio24,gpio27,gpio26 CLOCK_FREQ=12000000 MCU=rp2040 PWM_MAX=255 STATS_SUMSQ_BASE=256 STEPPER_BOTH_EDGE=1
+mcu 'mmu': Starting serial connect
+mcu 'mcu': got {'oid': 15, 'next_clock': 2433399744, 'value': 32657, '#name': 'analog_in_state', '#sent_time': 227670.307418223, '#receive_time': 227670.400376242}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2433999744, 'value': 32659, '#name': 'analog_in_state', '#sent_time': 227670.307418223, '#receive_time': 227670.450378668}
+mcu 'mmu': got {'oid': 6, 'next_clock': 504913081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.530194445, '#receive_time': 227670.53338502}
+mcu 'mmu': got {'oid': 5, 'next_clock': 505036081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.530194445, '#receive_time': 227670.543387668}
+mcu 'mmu': got {'oid': 6, 'next_clock': 505156081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.530194445, '#receive_time': 227670.553386538}
+mcu 'mmu': got {'oid': 5, 'next_clock': 505279081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.530194445, '#receive_time': 227670.563387131}
+mcu 'mmu': got {'oid': 6, 'next_clock': 505399081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.530194445, '#receive_time': 227670.573387223}
+mcu 'mmu': got {'oid': 5, 'next_clock': 505522081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.580594001, '#receive_time': 227670.583445094}
+mcu 'mmu': got {'oid': 6, 'next_clock': 505642081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.580594001, '#receive_time': 227670.593442649}
+mcu 'mmu': got {'oid': 5, 'next_clock': 505765081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.580594001, '#receive_time': 227670.604389982}
+mcu 'mmu': got {'oid': 6, 'next_clock': 505885081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.580594001, '#receive_time': 227670.614389168}
+mcu 'mmu': got {'oid': 5, 'next_clock': 506008081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.580594001, '#receive_time': 227670.624390668}
+mcu 'mmu': got {'oid': 6, 'next_clock': 506128081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.63162676, '#receive_time': 227670.634390131}
+mcu 'mmu': got {'oid': 5, 'next_clock': 506251081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.63162676, '#receive_time': 227670.644392149}
+mcu 'mmu': got {'oid': 6, 'next_clock': 506371081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.63162676, '#receive_time': 227670.65439176}
+mcu 'mmu': got {'oid': 5, 'next_clock': 506494081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.63162676, '#receive_time': 227670.664439871}
+mcu 'mmu': got {'oid': 6, 'next_clock': 506614081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.63162676, '#receive_time': 227670.674439094}
+mcu 'mmu': got {'oid': 5, 'next_clock': 506737081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.682627038, '#receive_time': 227670.685395131}
+mcu 'mmu': got {'oid': 6, 'next_clock': 506857081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.682627038, '#receive_time': 227670.695393797}
+mcu 'mcu': got {'oid': 15, 'next_clock': 2436999744, 'value': 32657, '#name': 'analog_in_state', '#sent_time': 227670.307418223, '#receive_time': 227670.700385445}
+mcu 'mmu': got {'oid': 5, 'next_clock': 506980081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.682627038, '#receive_time': 227670.705395871}
+mcu 'mmu': got {'oid': 6, 'next_clock': 507100081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.682627038, '#receive_time': 227670.715394871}
+mcu 'mmu': got {'oid': 5, 'next_clock': 507223081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.682627038, '#receive_time': 227670.725408279}
+mcu 'mmu': got {'oid': 6, 'next_clock': 507343081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.733587742, '#receive_time': 227670.73539576}
+mcu 'mmu': got {'oid': 5, 'next_clock': 507466081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.733587742, '#receive_time': 227670.745444316}
+mcu 'mcu': got {'oid': 20, 'next_clock': 2437599744, 'value': 32658, '#name': 'analog_in_state', '#sent_time': 227670.307418223, '#receive_time': 227670.750382853}
+mcu 'mmu': got {'oid': 6, 'next_clock': 507586081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.733587742, '#receive_time': 227670.755436408}
+mcu 'mmu': got {'oid': 5, 'next_clock': 507709081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.733587742, '#receive_time': 227670.766398871}
+mcu 'mmu': got {'oid': 6, 'next_clock': 507829081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.733587742, '#receive_time': 227670.776399168}
+mcu 'mmu': got {'oid': 5, 'next_clock': 507952081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.784569001, '#receive_time': 227670.786398612}
+mcu 'mmu': got {'oid': 6, 'next_clock': 508072081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.784569001, '#receive_time': 227670.796400371}
+mcu 'mmu': got {'oid': 5, 'next_clock': 508195081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.784569001, '#receive_time': 227670.806402353}
+mcu 'mmu': got {'oid': 6, 'next_clock': 508315081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.784569001, '#receive_time': 227670.816400001}
+mcu 'mmu': got {'oid': 5, 'next_clock': 508438081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.784569001, '#receive_time': 227670.826441482}
+mcu 'mmu': got {'oid': 6, 'next_clock': 508558081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.835552538, '#receive_time': 227670.836440853}
+mcu 'mmu': got {'oid': 5, 'next_clock': 508681081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.835552538, '#receive_time': 227670.847403556}
+mcu 'mmu': got {'oid': 6, 'next_clock': 508801081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.835552538, '#receive_time': 227670.857402501}
+mcu 'mmu': got {'oid': 5, 'next_clock': 508924081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.835552538, '#receive_time': 227670.867404019}
+mcu 'mmu': got {'oid': 6, 'next_clock': 509044081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.835552538, '#receive_time': 227670.87740326}
+mcu 'mmu': got {'oid': 5, 'next_clock': 509167081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.885767075, '#receive_time': 227670.887405186}
+mcu 'mmu': got {'oid': 6, 'next_clock': 509287081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.885767075, '#receive_time': 227670.897405186}
+mcu 'mmu': got {'oid': 5, 'next_clock': 509410081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.885767075, '#receive_time': 227670.907439816}
+mcu 'mmu': got {'oid': 6, 'next_clock': 509530081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.885767075, '#receive_time': 227670.917438556}
+mcu 'mmu': got {'oid': 5, 'next_clock': 509653081, 'count': 1099543, 'count_clock': 3894735377, '#name': 'counter_state', '#sent_time': 227670.885767075, '#receive_time': 227670.928407408}
+Loaded MCU 'mmu' 132 commands (v0.13.0-463-g2bd0acb6 / gcc: (15:14.2.rel1-1) 14.2.1 20241119 binutils: (2.44-3+23+b2) 2.44)
+MCU 'mmu' config: ADC_MAX=4095 BUS_PINS_i2c0a=gpio0,gpio1 BUS_PINS_i2c0b=gpio4,gpio5 BUS_PINS_i2c0c=gpio8,gpio9 BUS_PINS_i2c0d=gpio12,gpio13 BUS_PINS_i2c0e=gpio16,gpio17 BUS_PINS_i2c0f=gpio20,gpio21 BUS_PINS_i2c0g=gpio24,gpio25 BUS_PINS_i2c0h=gpio28,gpio29 BUS_PINS_i2c1a=gpio2,gpio3 BUS_PINS_i2c1b=gpio6,gpio7 BUS_PINS_i2c1c=gpio10,gpio11 BUS_PINS_i2c1d=gpio14,gpio15 BUS_PINS_i2c1e=gpio18,gpio19 BUS_PINS_i2c1f=gpio22,gpio23 BUS_PINS_i2c1g=gpio26,gpio27 BUS_PINS_spi0_gpio0_gpio3_gpio2=gpio0,gpio3,gpio2 BUS_PINS_spi0_gpio16_gpio19_gpio18=gpio16,gpio19,gpio18 BUS_PINS_spi0_gpio20_gpio23_gpio22=gpio20,gpio23,gpio22 BUS_PINS_spi0_gpio4_gpio3_gpio2=gpio4,gpio3,gpio2 BUS_PINS_spi0_gpio4_gpio7_gpio6=gpio4,gpio7,gpio6 BUS_PINS_spi0a=gpio0,gpio3,gpio2 BUS_PINS_spi0b=gpio4,gpio7,gpio6 BUS_PINS_spi0c=gpio16,gpio19,gpio18 BUS_PINS_spi0d=gpio20,gpio23,gpio22 BUS_PINS_spi1_gpio12_gpio11_gpio10=gpio12,gpio11,gpio10 BUS_PINS_spi1_gpio12_gpio15_gpio14=gpio12,gpio15,gpio14 BUS_PINS_spi1_gpio24_gpio27_gpio26=gpio24,gpio27,gpio26 BUS_PINS_spi1_gpio8_gpio11_gpio10=gpio8,gpio11,gpio10 BUS_PINS_spi1a=gpio8,gpio11,gpio10 BUS_PINS_spi1b=gpio12,gpio15,gpio14 BUS_PINS_spi1c=gpio24,gpio27,gpio26 CLOCK_FREQ=12000000 MCU=rp2040 PWM_MAX=255 STATS_SUMSQ_BASE=256 STEPPER_OPTIMIZED_EDGE=2 STEPPER_STEP_BOTH_EDGE=1
+mcu 'mmu': got {'oid': 6, 'next_clock': 509773081, 'count': 1, 'count_clock': 1646383315, '#name': 'counter_state', '#sent_time': 227670.93728813, '#receive_time': 227670.938401667}
+Configured MCU 'mcu' (1024 moves)
+Configured MCU 'mmu' (1024 moves)
+Starting heater checks for heater_bed
+Starting heater checks for extruder
+<span style="color:#FF69B4">Warning: Some persisted state was ignored because it contained errors:
+Incorrect number of gates specified in mmu_state_tool_to_gate_map
+Incorrect number of gates specified with mmu_state_gate_status</span>
+Happy Hare MacroSelector: Gate 0
+Stats 227671.2: gcodein=0 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1713 bytes_read=5113 bytes_retransmit=9 bytes_invalid=0 send_seq=150 receive_seq=150 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12010897 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1215 bytes_read=6180 bytes_retransmit=17 bytes_invalid=0 send_seq=121 receive_seq=121 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=29 upcoming_bytes=0 freq=12010071 adj=11998813 heater_bed: target=0 temp=0.0 pwm=0.000 print_time=227836.729 buffer_time=0.215 print_stall=0 extruder: target=0 temp=0.0 pwm=0.000 sysload=0.04 cputime=0.950 memavail=831888
+webhooks: registering remote method 'shutdown_machine' for connection id: 140733729592656
+webhooks: registering remote method 'reboot_machine' for connection id: 140733729592656
+webhooks: registering remote method 'pause_job_queue' for connection id: 140733729592656
+webhooks: registering remote method 'start_job_queue' for connection id: 140733729592656
+SET_KINEMATIC_POSITION pos=150.000,150.000,25.000 set_homed=xyz clear_homed=
+FILAMENT MOVEMENT SPEEDS:
+gear_from_spool_speed = 600.0
+gear_from_spool_accel = 100.0
+gear_unload_speed = 600.0
+gear_unload_accel = 100.0
+gear_from_buffer_speed = 600.0
+gear_from_buffer_accel = 100.0
+gear_short_move_speed = 200.0
+gear_short_move_accel = 100.0
+gear_short_move_threshold = 70.0
+gear_homing_speed = 250.0
+extruder_homing_speed = 15.0
+extruder_load_speed = 20.0
+extruder_unload_speed = 200.0
+extruder_sync_load_speed = 20.0
+extruder_sync_unload_speed = 200.0
+extruder_accel = 400.0
+
+MOTOR SYNC CONTROL:
+sync_to_extruder = 1
+sync_form_tip = 1
+sync_purge = 1
+sync_gear_current = 100%
+extruder_form_tip_current = 100%
+extruder_purge_current = 100%
+sync_feedback_enabled = 0
+sync_feedback_buffer_range = 6.0
+sync_feedback_buffer_maxrange = 12.0
+sync_feedback_speed_multiplier = 5.0
+sync_feedback_boost_multiplier = 3.0
+sync_feedback_extrude_threshold = 5.0
+sync_feedback_debug_log = 0
+
+FLOWGUARD:
+flowguard_enabled = 0
+flowguard_max_relief = 40.0
+
+LOADING/UNLOADING:
+gate_homing_endstop = mmu_gate
+gate_unload_buffer = 50.0
+gate_homing_max = 180.0
+gate_parking_distance = 23.0
+gate_preload_homing_max = 300.0
+gate_preload_parking_distance = -10.0
+gate_autoload = 1
+gate_final_eject_distance = 600.0
+bypass_autoload = 1
+extruder_force_homing = 0
+extruder_homing_endstop = extruder
+extruder_homing_max = 1000.0
+toolhead_extruder_to_nozzle = 72.0
+toolhead_sensor_to_nozzle = 12.0
+toolhead_homing_max = 320.0
+toolhead_entry_to_extruder = 30.0
+toolhead_residual_filament = 0.0
+toolhead_ooze_reduction = 0.0
+toolhead_unload_safety_margin = 10
+toolhead_entry_tension_test = 0
+toolhead_post_load_tighten = 60
+toolhead_post_load_tension_adjust = 1
+gcode_load_sequence = 0
+gcode_unload_sequence = 0
+
+TIP FORMING/CUTTING:
+form_tip_macro = _YAMMU_FORM_TIP
+force_form_tip_standalone = 1
+
+PURGING:
+purge_macro = 
+force_purge_standalone = 0
+
+LOGGING:
+log_level = 4
+log_visual = 1
+log_statistics = 1
+log_m117_messages = 1
+console_gate_stat = emoticon
+
+OTHER:
+extruder_temp_variance = 2.0
+endless_spool_enabled = 1
+endless_spool_on_load = 0
+endless_spool_eject_gate = -1
+spoolman_support = off
+t_macro_color = slicer
+preload_attempts = 5
+autotune_bowden_length = 1
+filament_recovery_on_pause = 1
+retry_tool_change_on_error = 0
+print_start_detection = 1
+show_error_dialog = 1
+
+CALIBRATION (mmu_vars.cfg):
+mmu_calibration_bowden_length = 742.8
+    TRACE: Running macro: _YAMMU_SELECT_TOOL GATE=0
+Unit : ------- 0 -------   ------- 1 -------   ----- 2 -----
+Gate : | 0 | 1 | 2 | 3 |   | 4 | 5 | 6 | 7 |   | 8 | 9 | 10|
+Tools: |T0 |T1 |T2 |T3 |   |T4 |T5 |T6 |T7 |   |T8 |T9 |T10|
+Avail: | ? | ? | ? | ? |   | ? | ? | ? | ? |   | ? | ? | ? |
+Selct: |\ /|------------   -----------------   ------------- T0
+[T0] > (g) .......... (e) .. [Ex .. (t) .. Nz] <b><span style="color:#87CEEB">UNLOADED</span></b> <b>0.0mm</b>
+Stats 227672.2: gcodein=0 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1719 bytes_read=5189 bytes_retransmit=9 bytes_invalid=0 send_seq=151 receive_seq=151 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000637 mmu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1255 bytes_read=7075 bytes_retransmit=17 bytes_invalid=0 send_seq=123 receive_seq=123 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12002247 adj=11999266 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227837.730 buffer_time=0.217 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.04 cputime=0.964 memavail=835552
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227837.679 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227837.881 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227838.084 unit=mmu_gear_bldc unit0
+    TRACE: Processing idle_timeout 'ready' event
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227838.286 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227838.489 unit=mmu_gear_bldc unit0
+Stats 227673.2: gcodein=0 mcu: mcu_awake=0.000 mcu_task_avg=0.000000 mcu_task_stddev=0.000000 bytes_write=1725 bytes_read=5295 bytes_retransmit=9 bytes_invalid=0 send_seq=152 receive_seq=152 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000735 mmu: mcu_awake=0.006 mcu_task_avg=0.000005 mcu_task_stddev=0.000022 bytes_write=1261 bytes_read=8987 bytes_retransmit=17 bytes_invalid=0 send_seq=124 receive_seq=124 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=11999795 adj=12004512 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227837.730 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.04 cputime=0.978 memavail=836768
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227838.691 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227838.894 unit=mmu_gear_bldc unit0
+<span style="color:#C0C0C0">(\_/)</span>
+<span style="color:#C0C0C0">( </span>*,*<span style="color:#C0C0C0">)</span>
+<span style="color:#C0C0C0">(")_(")</span> <b><span style="color:#FF69B4">H</span><span style="color:#90EE90">a</span><span style="color:#87CEEB">p</span><span style="color:#FF69B4">p</span><span style="color:#90EE90">y</span> <span style="color:#87CEEB">H</span><span style="color:#FF69B4">a</span><span style="color:#90EE90">r</span><span style="color:#87CEEB">e</span> <span style="color:#C0C0C0">v3.4.2</span> <span style="color:#FF69B4">R</span><span style="color:#90EE90">e</span><span style="color:#87CEEB">a</span><span style="color:#FF69B4">d</span><span style="color:#90EE90">y</span><span style="color:#C0C0C0">...</span></b>
+  DEBUG: Job State: READY -> INITIALIZED (MMU State: Encoder: n/a, Synced: False, Paused temp: None, Resume to state: ready, Position saved for: , pause_resume: False, Idle timeout: 600.00s)
+    TRACE: Running macro: _MMU_PRINT_STATE_CHANGED STATE='initialized' OLD_STATE='ready'
+Unit : ------- 0 -------   ------- 1 -------   ----- 2 -----
+Gate : | 0 | 1 | 2 | 3 |   | 4 | 5 | 6 | 7 |   | 8 | 9 | 10|
+Tools: |T0 |T1 |T2 |T3 |   |T4 |T5 |T6 |T7 |   |T8 |T9 |T10|
+Avail: | ? | ? | ? | ? |   | ? | ? | ? | ? |   | ? | ? | ? |
+Selct: |\ /|------------   -----------------   ------------- T0
+[T0] > (g) .......... (e) .. [Ex .. (t) .. Nz] <b><span style="color:#87CEEB">UNLOADED</span></b> <b>0.0mm</b>
+<span style="color:#FF69B4">Warning: Calibration steps are not complete:
+Required:
+- Use MMU_CALIBRATE_GEAR (with appropriate gate selected) to calibrate gear rotation_distance on gates: 8,9,10</span>
+    TRACE: Disabled FlowGuard and runout detection
+    TRACE: Processing idle_timeout 'printing' event
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227839.096 unit=mmu_gear_bldc unit0
+      STEPPER: _quiesce_align_get_tcut(full=True, wait=True) Elapsed:0.303404
+  DEBUG: Failed to push lane data to Moonraker: Remote method 'moonraker_push_lane_data' not registered
+  DEBUG: Failed to cleanup old lane data: Remote method 'moonraker_cleanup_lane_data' not registered
+    TRACE: Running macro: _MMU_EVENT EVENT=restart 
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227839.299 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227839.501 unit=mmu_gear_bldc unit0
+Stats 227674.2: gcodein=0 mcu: mcu_awake=0.005 mcu_task_avg=0.000007 mcu_task_stddev=0.000007 bytes_write=1731 bytes_read=5415 bytes_retransmit=9 bytes_invalid=0 send_seq=153 receive_seq=153 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000125 mmu: mcu_awake=0.006 mcu_task_avg=0.000005 mcu_task_stddev=0.000022 bytes_write=1860 bytes_read=11099 bytes_retransmit=17 bytes_invalid=0 send_seq=149 receive_seq=149 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=11999397 adj=11999863 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.04 cputime=1.000 memavail=834000
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227839.704 unit=mmu_gear_bldc unit0
+    TRACE: Processing idle_timeout 'ready' event
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227839.906 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227840.109 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227840.311 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227840.513 unit=mmu_gear_bldc unit0
+Stats 227675.2: gcodein=0 mcu: mcu_awake=0.005 mcu_task_avg=0.000007 mcu_task_stddev=0.000007 bytes_write=1737 bytes_read=5551 bytes_retransmit=9 bytes_invalid=0 send_seq=154 receive_seq=154 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000736 mmu: mcu_awake=0.006 mcu_task_avg=0.000005 mcu_task_stddev=0.000022 bytes_write=3066 bytes_read=13429 bytes_retransmit=17 bytes_invalid=0 send_seq=198 receive_seq=198 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=11999364 adj=12000159 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.04 cputime=1.020 memavail=835120
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227840.716 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227840.918 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227841.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227841.323 unit=mmu_gear_bldc unit0
+Stats 227676.2: gcodein=0 mcu: mcu_awake=0.005 mcu_task_avg=0.000007 mcu_task_stddev=0.000007 bytes_write=1743 bytes_read=5657 bytes_retransmit=9 bytes_invalid=0 send_seq=155 receive_seq=155 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000192 mmu: mcu_awake=0.006 mcu_task_avg=0.000005 mcu_task_stddev=0.000022 bytes_write=4263 bytes_read=15752 bytes_retransmit=17 bytes_invalid=0 send_seq=246 receive_seq=246 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=11999945 adj=11998474 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.04 cputime=1.040 memavail=836384
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227841.526 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227841.728 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227841.931 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227842.133 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227842.336 unit=mmu_gear_bldc unit0
+Stats 227677.2: gcodein=0 mcu: mcu_awake=0.005 mcu_task_avg=0.000007 mcu_task_stddev=0.000007 bytes_write=1749 bytes_read=5763 bytes_retransmit=9 bytes_invalid=0 send_seq=156 receive_seq=156 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000553 mmu: mcu_awake=0.006 mcu_task_avg=0.000005 mcu_task_stddev=0.000022 bytes_write=5380 bytes_read=17972 bytes_retransmit=17 bytes_invalid=0 send_seq=277 receive_seq=277 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=11999785 adj=12001247 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.2 pwm=0.000 sysload=0.04 cputime=1.060 memavail=839056
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227842.538 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227842.741 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227842.943 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227843.146 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227843.348 unit=mmu_gear_bldc unit0
+Stats 227678.2: gcodein=0 mcu: mcu_awake=0.005 mcu_task_avg=0.000007 mcu_task_stddev=0.000007 bytes_write=1755 bytes_read=5899 bytes_retransmit=9 bytes_invalid=0 send_seq=157 receive_seq=157 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000460 mmu: mcu_awake=0.078 mcu_task_avg=0.000039 mcu_task_stddev=0.000157 bytes_write=6431 bytes_read=20189 bytes_retransmit=17 bytes_invalid=0 send_seq=302 receive_seq=302 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000189 adj=11999467 heater_bed: target=0 temp=-30.2 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.04 cputime=1.080 memavail=839280
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227843.551 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227843.753 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227843.956 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227844.158 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227844.361 unit=mmu_gear_bldc unit0
+Stats 227679.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000005 mcu_task_stddev=0.000005 bytes_write=1761 bytes_read=6017 bytes_retransmit=9 bytes_invalid=0 send_seq=158 receive_seq=158 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000614 mmu: mcu_awake=0.078 mcu_task_avg=0.000039 mcu_task_stddev=0.000157 bytes_write=7515 bytes_read=22397 bytes_retransmit=17 bytes_invalid=0 send_seq=327 receive_seq=327 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000395 adj=12000825 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.03 cputime=1.102 memavail=839280
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227844.563 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227844.766 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227844.968 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227845.172 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227845.374 unit=mmu_gear_bldc unit0
+Stats 227680.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000005 mcu_task_stddev=0.000005 bytes_write=1773 bytes_read=6139 bytes_retransmit=9 bytes_invalid=0 send_seq=160 receive_seq=160 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000584 mmu: mcu_awake=0.078 mcu_task_avg=0.000039 mcu_task_stddev=0.000157 bytes_write=8601 bytes_read=24607 bytes_retransmit=17 bytes_invalid=0 send_seq=352 receive_seq=352 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000497 adj=12000686 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.03 cputime=1.123 memavail=837680
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227845.577 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227845.779 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227845.982 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227846.184 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227846.387 unit=mmu_gear_bldc unit0
+Stats 227681.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000005 mcu_task_stddev=0.000005 bytes_write=1779 bytes_read=6275 bytes_retransmit=9 bytes_invalid=0 send_seq=161 receive_seq=161 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000612 mmu: mcu_awake=0.078 mcu_task_avg=0.000039 mcu_task_stddev=0.000157 bytes_write=9682 bytes_read=26815 bytes_retransmit=17 bytes_invalid=0 send_seq=377 receive_seq=377 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000540 adj=12000897 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.03 cputime=1.146 memavail=838464
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227846.589 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227846.792 unit=mmu_gear_bldc unit0
+Write g-code response
+Traceback (most recent call last):
+  File "/home/user/klipper/klippy/gcode.py", line 471, in _respond_raw
+    os.write(self.fd, (msg+"\n").encode())
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+BlockingIOError: [Errno 11] Resource temporarily unavailable
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227846.994 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227847.197 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227847.399 unit=mmu_gear_bldc unit0
+Stats 227682.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000005 mcu_task_stddev=0.000005 bytes_write=1785 bytes_read=6381 bytes_retransmit=9 bytes_invalid=0 send_seq=162 receive_seq=162 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000448 mmu: mcu_awake=0.078 mcu_task_avg=0.000039 mcu_task_stddev=0.000157 bytes_write=10791 bytes_read=29020 bytes_retransmit=17 bytes_invalid=0 send_seq=405 receive_seq=405 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000558 adj=12000702 heater_bed: target=0 temp=-30.2 pwm=0.000 print_time=227839.232 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.03 cputime=1.171 memavail=838576
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227847.602 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227847.804 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.007 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.209 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.412 unit=mmu_gear_bldc unit0
+  DEBUG: Moving 'synced' motor 100.0mm...
+    TRACE: Processing idle_timeout 'printing' event
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.001038
+      STEPPER: resync(unsynced --> extruder+gear)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000234
+      STEPPER: sync(mode=3 extruder+gear)
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit1)
+MmuSyncFeedbackManager: Synced MMU to extruder
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.467 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: SYNCED MOVE: dist=100.0, speed=100.0, accel=100.0, wait=True
+      STEPPER: BLDC_PROCESS_MOVE: print_time=227848.718 start=0.000 cruise=100.000 end=0.000 accel_t=0.0333 cruise_t=0.9667 decel_t=0.0333 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: captured window start=227848.718 end=227849.751 generation=1 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.482 unit=mmu_gear_bldc unit1
+Stats 227683.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000005 mcu_task_stddev=0.000005 bytes_write=2074 bytes_read=6721 bytes_retransmit=9 bytes_invalid=0 send_seq=177 receive_seq=177 retransmit_seq=2 srtt=0.000 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000504 mmu: mcu_awake=0.095 mcu_task_avg=0.000050 mcu_task_stddev=0.000179 bytes_write=11558 bytes_read=31240 bytes_retransmit=17 bytes_invalid=0 send_seq=429 receive_seq=429 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000494 adj=12001204 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227849.751 buffer_time=1.232 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.03 cputime=1.203 memavail=839296
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.614 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_MAP: mode=mapped reason=mapped points=10 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=startup_inhibit reason=startup_inhibit error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227848.789 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.9000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_DIR_0 applied=1.0000 time=227848.818 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=0.9000 applied=1.0000 time=227848.918 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9000 time=227849.018 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.9000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9000 applied=0.9000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=1665.2 base_pwm=0.9000 correction_pwm=0.1500 integral_pwm=0.1500 applied_pwm=0.9000 time=227848.958 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=1.0000 time=227849.118 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=deadband reason=deadband error_rpm=-44.1 base_pwm=1.0000 correction_pwm=0.1500 integral_pwm=0.1500 applied_pwm=1.0000 time=227848.979 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=-44.1 base_pwm=1.0000 correction_pwm=0.1500 integral_pwm=0.1500 applied_pwm=1.0000 time=227848.988 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=-2554.2 base_pwm=1.0000 correction_pwm=0.1095 integral_pwm=0.1145 applied_pwm=1.0000 time=227849.189 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9927 time=227849.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1550.033 rpm=5166.8 time=227849.220 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9852 time=227849.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9777 time=227849.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9695 time=227849.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.9695 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9695 applied=0.9695 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9616 time=227849.721 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9541 time=227849.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9462 time=227849.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9382 time=227850.021 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9307 time=227850.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=-3437.7 base_pwm=0.9307 correction_pwm=0.0307 integral_pwm=0.0374 applied_pwm=0.9307 time=227849.389 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.9307 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9307 applied=0.9307 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9230 time=227850.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9148 time=227850.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9072 time=227850.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9001 time=227850.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8926 time=227850.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.8926 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8926 applied=0.8926 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8850 time=227850.721 unit=mmu_gear_bldc unit0
+Stats 227684.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=2282 bytes_read=7052 bytes_retransmit=9 bytes_invalid=0 send_seq=188 receive_seq=188 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000548 mmu: mcu_awake=0.095 mcu_task_avg=0.000050 mcu_task_stddev=0.000179 bytes_write=12039 bytes_read=33467 bytes_retransmit=17 bytes_invalid=0 send_seq=461 receive_seq=461 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=96 freq=12000392 adj=12000252 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227849.751 buffer_time=0.231 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.03 cputime=1.239 memavail=839840
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8780 time=227850.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8710 time=227850.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8647 time=227851.021 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8580 time=227851.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.8580 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8580 applied=0.8580 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=-2834.5 base_pwm=0.8580 correction_pwm=-0.0479 integral_pwm=-0.0423 applied_pwm=0.8580 time=227849.605 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8521 time=227851.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.8500 time=227851.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8500 applied=0.8500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8500 applied=0.8500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8500 applied=0.8500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.8500 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8500 applied=0.8500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.8500 applied=0.8500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: late terminal sample emit=227849.752 end=227849.751 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.8500 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.8500 time=227849.722 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=227851.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: window expired before next sample emit=227849.752 end=227849.751 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1265.779 rpm=4219.3 time=227849.726 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'synced' moved 100.0mm, encoder measured 0.0mm (delta 100.0mm). Pos: @0.0, (0.0mm)
+Moved 100.0mm
+      STEPPER: resync(extruder+gear --> unsynced)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000694
+      STEPPER: unsync()
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227849.759 unit=mmu_gear_bldc unit1
+  DEBUG: Moving 'synced' motor 100.0mm...
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000198
+      STEPPER: resync(unsynced --> extruder+gear)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000430
+      STEPPER: sync(mode=3 extruder+gear)
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit1)
+MmuSyncFeedbackManager: Synced MMU to extruder
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: SYNCED MOVE: dist=100.0, speed=200.0, accel=100.0, wait=True
+      STEPPER: BLDC_PROCESS_MOVE: print_time=227850.014 start=0.000 cruise=200.000 end=0.000 accel_t=0.0667 cruise_t=0.4333 decel_t=0.0667 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: captured window start=227850.014 end=227850.580 generation=2 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227849.777 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-3577.1 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227849.929 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=200.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=startup_inhibit reason=startup_inhibit error_rpm=-2999.9 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.084 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=200.000 requested_rpm=3330.7 clamped_rpm=3330.7 pwm=0.9500 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=0.9500 applied=1.0000 time=227851.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9500 time=227851.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=200.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=200.000 requested_rpm=3330.7 clamped_rpm=3330.7 pwm=0.9500 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9500 applied=0.9500 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=867.440 rpm=2891.5 time=227850.232 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=630.3 base_pwm=0.9500 correction_pwm=0.0026 integral_pwm=0.0014 applied_pwm=0.9500 time=227850.254 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9526 time=227851.721 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9546 time=227851.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=200.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=200.000 requested_rpm=3330.7 clamped_rpm=3330.7 pwm=0.9546 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9546 applied=0.9546 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9566 time=227851.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9587 time=227852.021 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9603 time=227852.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9623 time=227852.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9641 time=227852.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=200.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=200.000 requested_rpm=3330.7 clamped_rpm=3330.7 pwm=0.9641 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9641 applied=0.9641 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9665 time=227852.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9689 time=227852.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9715 time=227852.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=1267.2 base_pwm=0.9715 correction_pwm=0.0248 integral_pwm=0.0223 applied_pwm=0.9715 time=227850.457 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9748 time=227852.721 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9774 time=227852.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=200.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=200.000 requested_rpm=3330.7 clamped_rpm=3330.7 pwm=0.9774 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9774 applied=0.9774 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9799 time=227852.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9823 time=227853.021 unit=mmu_gear_bldc unit0
+Stats 227685.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=2479 bytes_read=7219 bytes_retransmit=9 bytes_invalid=0 send_seq=194 receive_seq=194 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000509 mmu: mcu_awake=0.095 mcu_task_avg=0.000050 mcu_task_stddev=0.000179 bytes_write=12549 bytes_read=35701 bytes_retransmit=17 bytes_invalid=0 send_seq=494 receive_seq=494 retransmit_seq=3 srtt=0.001 rttvar=0.001 rto=0.025 ready_bytes=0 upcoming_bytes=201 freq=12000377 adj=11999582 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227850.580 buffer_time=0.060 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.03 cputime=1.278 memavail=840688
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9847 time=227853.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: late terminal sample emit=227850.581 end=227850.580 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.9847 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.9847 time=227850.551 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=227853.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: window expired before next sample emit=227850.581 end=227850.580 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'synced' moved 100.0mm, encoder measured 0.0mm (delta 100.0mm). Pos: @0.0, (0.0mm)
+Moved 100.0mm
+      STEPPER: resync(extruder+gear --> unsynced)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000185
+      STEPPER: unsync()
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.587 unit=mmu_gear_bldc unit1
+  DEBUG: Moving 'synced' motor 100.0mm...
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.588 unit=mmu_gear_bldc unit1
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000518
+      STEPPER: resync(unsynced --> extruder+gear)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000137
+      STEPPER: sync(mode=3 extruder+gear)
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit1)
+MmuSyncFeedbackManager: Synced MMU to extruder
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.591 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: SYNCED MOVE: dist=100.0, speed=300.0, accel=100.0, wait=True
+      STEPPER: BLDC_PROCESS_MOVE: print_time=227850.842 start=0.000 cruise=300.000 end=0.000 accel_t=0.1000 cruise_t=0.2333 decel_t=0.1000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: captured window start=227850.842 end=227851.275 generation=3 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.608 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_TACH: freq=536.574 rpm=1788.6 time=227850.739 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-1709.4 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.760 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=300.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=startup_inhibit reason=startup_inhibit error_rpm=-1515.1 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227850.913 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=300.000 requested_rpm=4996.0 clamped_rpm=4996.0 pwm=0.9833 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=0.9833 applied=1.0000 time=227853.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9833 time=227853.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=300.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=300.000 requested_rpm=4996.0 clamped_rpm=4996.0 pwm=0.9833 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=0.9833 applied=0.9833 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=4086.9 base_pwm=0.9833 correction_pwm=0.0179 integral_pwm=0.0099 applied_pwm=0.9833 time=227851.063 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=1.0000 time=227853.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=300.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=300.000 requested_rpm=4996.0 clamped_rpm=4996.0 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=100.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=100.000 requested_rpm=1665.3 clamped_rpm=1665.3 pwm=0.9827 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9827 time=227853.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9774 time=227853.721 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9789 time=227853.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: late terminal sample emit=227851.276 end=227851.275 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=303.791 rpm=1012.6 time=227851.245 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.9789 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.9789 time=227851.246 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=227853.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: window expired before next sample emit=227851.276 end=227851.275 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'synced' moved 100.0mm, encoder measured 0.0mm (delta 100.0mm). Pos: @0.0, (0.0mm)
+Moved 100.0mm
+      STEPPER: resync(extruder+gear --> unsynced)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000436
+      STEPPER: unsync()
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.282 unit=mmu_gear_bldc unit1
+  DEBUG: Moving 'synced' motor 100.0mm...
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000323
+      STEPPER: resync(unsynced --> extruder+gear)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000155
+      STEPPER: sync(mode=3 extruder+gear)
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit1)
+MmuSyncFeedbackManager: Synced MMU to extruder
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: SYNCED MOVE: dist=100.0, speed=400.0, accel=100.0, wait=True
+      STEPPER: BLDC_PROCESS_MOVE: print_time=227851.536 start=0.000 cruise=387.298 end=0.000 accel_t=0.1291 cruise_t=0.1291 decel_t=0.1291 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: captured window start=227851.536 end=227851.923 generation=4 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.297 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.449 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+Stats 227686.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=2852 bytes_read=7396 bytes_retransmit=9 bytes_invalid=0 send_seq=202 receive_seq=202 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000538 mmu: mcu_awake=0.095 mcu_task_avg=0.000050 mcu_task_stddev=0.000179 bytes_write=13043 bytes_read=37920 bytes_retransmit=17 bytes_invalid=0 send_seq=526 receive_seq=526 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=194 freq=12000253 adj=11999745 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227851.923 buffer_time=0.402 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.03 cputime=1.318 memavail=841872
+      STEPPER: BLDC_SET_SPEED: requested speed=300.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=startup_inhibit reason=startup_inhibit error_rpm=-2333.2 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.607 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=300.000 requested_rpm=4996.0 clamped_rpm=4996.0 pwm=0.9833 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=0.9833 applied=1.0000 time=227854.021 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9833 time=227854.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=387.298 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=387.298 requested_rpm=6449.8 clamped_rpm=6000.0 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=1.0000 time=227854.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1060.159 rpm=3533.9 time=227851.751 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=2456.0 base_pwm=1.0000 correction_pwm=0.0102 integral_pwm=0.0054 applied_pwm=1.0000 time=227851.773 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=261.895 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=261.895 requested_rpm=4361.4 clamped_rpm=4361.4 pwm=0.9829 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9829 time=227854.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9812 time=227854.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9825 time=227854.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9845 time=227854.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9865 time=227854.721 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9886 time=227854.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: late terminal sample emit=227851.924 end=227851.923 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.9886 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.9886 time=227851.894 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=227854.921 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: window expired before next sample emit=227851.924 end=227851.923 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'synced' moved 100.0mm, encoder measured 0.0mm (delta 100.0mm). Pos: @0.0, (0.0mm)
+Moved 100.0mm
+      STEPPER: resync(extruder+gear --> unsynced)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000190
+      STEPPER: unsync()
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.928 unit=mmu_gear_bldc unit1
+  DEBUG: Moving 'synced' motor 100.0mm...
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000332
+      STEPPER: resync(unsynced --> extruder+gear)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000145
+      STEPPER: sync(mode=3 extruder+gear)
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit1)
+MmuSyncFeedbackManager: Synced MMU to extruder
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: synced, starting BLDC and initializing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook installed
+      STEPPER: SYNCED MOVE: dist=100.0, speed=500.0, accel=100.0, wait=True
+      STEPPER: BLDC_PROCESS_MOVE: print_time=227852.182 start=0.000 cruise=387.298 end=0.000 accel_t=0.1291 cruise_t=0.1291 decel_t=0.1291 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: captured window start=227852.182 end=227852.569 generation=5 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227851.945 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-3666.4 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.096 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=300.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=startup_inhibit reason=startup_inhibit error_rpm=-3881.6 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.253 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=300.000 requested_rpm=4996.0 clamped_rpm=4996.0 pwm=0.9833 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: kick req=0.9833 applied=1.0000 time=227855.021 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9833 time=227855.121 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1121.864 rpm=3739.5 time=227852.258 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=387.298 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=387.298 requested_rpm=6449.8 clamped_rpm=6000.0 pwm=1.0000 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=1.0000 time=227855.221 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=active reason=active error_rpm=2049.7 base_pwm=1.0000 correction_pwm=0.0086 integral_pwm=0.0046 applied_pwm=1.0000 time=227852.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: discard req=1.0000 applied=1.0000 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=261.895 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SPEED: source=process_move_push speed=261.895 requested_rpm=4361.4 clamped_rpm=4361.4 pwm=0.9801 dir=forward unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9801 time=227855.321 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9773 time=227855.421 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9779 time=227855.521 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9788 time=227855.621 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.9796 time=227855.721 unit=mmu_gear_bldc unit0
+Stats 227687.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3139 bytes_read=7593 bytes_retransmit=9 bytes_invalid=0 send_seq=208 receive_seq=208 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000550 mmu: mcu_awake=0.095 mcu_task_avg=0.000050 mcu_task_stddev=0.000179 bytes_write=13553 bytes_read=40154 bytes_retransmit=17 bytes_invalid=0 send_seq=559 receive_seq=559 retransmit_seq=3 srtt=0.001 rttvar=0.001 rto=0.025 ready_bytes=0 upcoming_bytes=259 freq=12000161 adj=11999066 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.569 buffer_time=0.047 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.03 cputime=1.356 memavail=842992
+      STEPPER: BLDC_PROCESS_MOVE: late terminal sample emit=227852.570 end=227852.569 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_SPEED: requested speed=0.000 mm/s source=process_move_push unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.9796 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.9796 time=227852.541 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_SET_PIN: pin=YAMMU_BLDC_PWM_0 applied=0.0000 time=227855.821 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_PROCESS_MOVE: window expired before next sample emit=227852.570 end=227852.569 unit=mmu_gear_bldc unit0
+    TRACE: Test move. Stepper: 'synced' moved 100.0mm, encoder measured 0.0mm (delta 100.0mm). Pos: @0.0, (0.0mm)
+Moved 100.0mm
+      STEPPER: resync(extruder+gear --> unsynced)
+      STEPPER: _quiesce_align_get_tcut(full=False, wait=False) Elapsed:0.000289
+      STEPPER: unsync()
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit0)
+      STEPPER: BLDC_PROCESS_MOVE: hook removed
+      STEPPER: BLDC_SYNC: unsynced, stopping BLDC and clearing sync state (unit=mmu_gear_bldc unit1)
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.574 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=disabled reason=disabled error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.593 unit=mmu_gear_bldc unit1
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4444.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.745 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1316.931 rpm=4389.8 time=227852.764 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4497.5 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227852.947 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4773.1 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227853.150 unit=mmu_gear_bldc unit0
+    TRACE: Processing idle_timeout 'ready' event
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-77.8 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227853.352 unit=mmu_gear_bldc unit0
+Stats 227688.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3173 bytes_read=7745 bytes_retransmit=9 bytes_invalid=0 send_seq=211 receive_seq=211 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000504 mmu: mcu_awake=0.086 mcu_task_avg=0.000042 mcu_task_stddev=0.000165 bytes_write=14154 bytes_read=42473 bytes_retransmit=17 bytes_invalid=0 send_seq=610 receive_seq=610 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=187 freq=12000152 adj=11998703 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.03 cputime=1.380 memavail=844368
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4999.6 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227853.555 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4608.7 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227853.757 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1382.607 rpm=4608.7 time=227853.776 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227853.960 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4937.9 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227854.162 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1569.497 rpm=5231.7 time=227854.283 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-5040.3 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227854.365 unit=mmu_gear_bldc unit0
+Stats 227689.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000007 mcu_task_stddev=0.000009 bytes_write=3207 bytes_read=7911 bytes_retransmit=9 bytes_invalid=0 send_seq=214 receive_seq=214 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000512 mmu: mcu_awake=0.086 mcu_task_avg=0.000042 mcu_task_stddev=0.000165 bytes_write=14665 bytes_read=44705 bytes_retransmit=17 bytes_invalid=0 send_seq=643 receive_seq=643 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=106 freq=12000153 adj=11999055 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.03 cputime=1.403 memavail=845632
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4937.9 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227854.567 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-5102.5 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227854.770 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1530.758 rpm=5102.5 time=227854.789 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227854.972 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4999.7 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227855.175 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1560.867 rpm=5202.9 time=227855.295 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4877.7 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227855.377 unit=mmu_gear_bldc unit0
+Stats 227690.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000007 mcu_task_stddev=0.000009 bytes_write=3241 bytes_read=8093 bytes_retransmit=9 bytes_invalid=0 send_seq=217 receive_seq=217 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000514 mmu: mcu_awake=0.086 mcu_task_avg=0.000042 mcu_task_stddev=0.000165 bytes_write=15172 bytes_read=46931 bytes_retransmit=17 bytes_invalid=0 send_seq=676 receive_seq=676 retransmit_seq=3 srtt=0.001 rttvar=0.001 rto=0.025 ready_bytes=0 upcoming_bytes=17 freq=12000189 adj=11999165 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-31.1 pwm=0.000 sysload=0.03 cputime=1.426 memavail=846672
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4499.8 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227855.580 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=-4658.4 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227855.782 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_TACH: freq=1399.938 rpm=4666.5 time=227855.802 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227855.985 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227856.187 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227856.390 unit=mmu_gear_bldc unit0
+Stats 227691.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000007 mcu_task_stddev=0.000009 bytes_write=3275 bytes_read=8245 bytes_retransmit=9 bytes_invalid=0 send_seq=220 receive_seq=220 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000518 mmu: mcu_awake=0.086 mcu_task_avg=0.000042 mcu_task_stddev=0.000165 bytes_write=15584 bytes_read=49128 bytes_retransmit=17 bytes_invalid=0 send_seq=702 receive_seq=702 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000203 adj=11999467 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.03 cputime=1.449 memavail=847120
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227856.592 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227856.795 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227856.997 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227857.200 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227857.402 unit=mmu_gear_bldc unit0
+Stats 227692.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000007 mcu_task_stddev=0.000009 bytes_write=3309 bytes_read=8397 bytes_retransmit=9 bytes_invalid=0 send_seq=223 receive_seq=223 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000522 mmu: mcu_awake=0.086 mcu_task_avg=0.000042 mcu_task_stddev=0.000165 bytes_write=15964 bytes_read=51312 bytes_retransmit=17 bytes_invalid=0 send_seq=725 receive_seq=725 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000221 adj=11999578 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.03 cputime=1.470 memavail=848256
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227857.605 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227857.807 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227858.010 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227858.212 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227858.415 unit=mmu_gear_bldc unit0
+Stats 227693.2: gcodein=0 mcu: mcu_awake=0.002 mcu_task_avg=0.000007 mcu_task_stddev=0.000009 bytes_write=3343 bytes_read=8579 bytes_retransmit=9 bytes_invalid=0 send_seq=226 receive_seq=226 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000522 mmu: mcu_awake=0.087 mcu_task_avg=0.000044 mcu_task_stddev=0.000168 bytes_write=16349 bytes_read=53514 bytes_retransmit=17 bytes_invalid=0 send_seq=749 receive_seq=749 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000235 adj=11999685 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.7 pwm=0.000 sysload=0.03 cputime=1.493 memavail=848672
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227858.617 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227858.820 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227859.022 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227859.225 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227859.428 unit=mmu_gear_bldc unit0
+Stats 227694.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3377 bytes_read=8744 bytes_retransmit=9 bytes_invalid=0 send_seq=229 receive_seq=229 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000522 mmu: mcu_awake=0.087 mcu_task_avg=0.000044 mcu_task_stddev=0.000168 bytes_write=16712 bytes_read=55665 bytes_retransmit=17 bytes_invalid=0 send_seq=771 receive_seq=771 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000244 adj=11999770 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.02 cputime=1.515 memavail=849056
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227859.630 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227859.833 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227860.035 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227860.238 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227860.440 unit=mmu_gear_bldc unit0
+Stats 227695.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3411 bytes_read=8896 bytes_retransmit=9 bytes_invalid=0 send_seq=232 receive_seq=232 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000518 mmu: mcu_awake=0.087 mcu_task_avg=0.000044 mcu_task_stddev=0.000168 bytes_write=17097 bytes_read=57854 bytes_retransmit=17 bytes_invalid=0 send_seq=795 receive_seq=795 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000250 adj=11999813 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.02 cputime=1.536 memavail=849280
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227860.643 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227860.845 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227861.048 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227861.250 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227861.453 unit=mmu_gear_bldc unit0
+Stats 227696.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3445 bytes_read=9078 bytes_retransmit=9 bytes_invalid=0 send_seq=235 receive_seq=235 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000514 mmu: mcu_awake=0.087 mcu_task_avg=0.000044 mcu_task_stddev=0.000168 bytes_write=17477 bytes_read=60036 bytes_retransmit=17 bytes_invalid=0 send_seq=818 receive_seq=818 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000249 adj=11999850 heater_bed: target=0 temp=-30.2 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.6 pwm=0.000 sysload=0.02 cputime=1.559 memavail=849856
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227861.655 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227861.858 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227862.060 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227862.263 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227862.465 unit=mmu_gear_bldc unit0
+Stats 227697.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3479 bytes_read=9230 bytes_retransmit=9 bytes_invalid=0 send_seq=238 receive_seq=238 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000509 mmu: mcu_awake=0.087 mcu_task_avg=0.000044 mcu_task_stddev=0.000168 bytes_write=17857 bytes_read=62220 bytes_retransmit=17 bytes_invalid=0 send_seq=841 receive_seq=841 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000249 adj=11999842 heater_bed: target=0 temp=-30.7 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-31.1 pwm=0.000 sysload=0.02 cputime=1.580 memavail=850320
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227862.668 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227862.870 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227863.073 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227863.275 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227863.478 unit=mmu_gear_bldc unit0
+Stats 227698.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3513 bytes_read=9382 bytes_retransmit=9 bytes_invalid=0 send_seq=241 receive_seq=241 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000503 mmu: mcu_awake=0.086 mcu_task_avg=0.000046 mcu_task_stddev=0.000172 bytes_write=18242 bytes_read=64422 bytes_retransmit=17 bytes_invalid=0 send_seq=865 receive_seq=865 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000247 adj=11999852 heater_bed: target=0 temp=-30.4 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.4 pwm=0.000 sysload=0.02 cputime=1.603 memavail=850432
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227863.680 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227863.883 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227864.085 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227864.288 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227864.490 unit=mmu_gear_bldc unit0
+Stats 227699.2: gcodein=0 mcu: mcu_awake=0.001 mcu_task_avg=0.000006 mcu_task_stddev=0.000005 bytes_write=3547 bytes_read=9577 bytes_retransmit=9 bytes_invalid=0 send_seq=244 receive_seq=244 retransmit_seq=2 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000499 mmu: mcu_awake=0.086 mcu_task_avg=0.000046 mcu_task_stddev=0.000172 bytes_write=18605 bytes_read=66593 bytes_retransmit=17 bytes_invalid=0 send_seq=887 receive_seq=887 retransmit_seq=3 srtt=0.001 rttvar=0.000 rto=0.025 ready_bytes=0 upcoming_bytes=0 freq=12000246 adj=11999850 heater_bed: target=0 temp=-30.6 pwm=0.000 print_time=227852.825 buffer_time=0.000 print_stall=0 extruder: target=0 temp=-30.9 pwm=0.000 sysload=0.02 cputime=1.625 memavail=850944
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227864.693 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227864.895 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227865.098 unit=mmu_gear_bldc unit0
+      STEPPER: BLDC_CONTROL: source=stopped reason=stopped error_rpm=0.0 base_pwm=0.0000 correction_pwm=0.0000 integral_pwm=0.0000 applied_pwm=0.0000 time=227865.300 unit=mmu_gear_bldc unit0
