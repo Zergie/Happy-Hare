@@ -14,6 +14,7 @@ from types import MethodType
 from .. import output_pin
 from .. import mmu_espooler
 from .. import pulse_counter
+from .mmu_shared import MmuError
 
 class SyncMonitorBase:
     def activate(self, bldc):
@@ -291,6 +292,11 @@ class ProcessMoveSyncMonitor(SyncMonitorBase):
 
 
 class MmuGearBldc:
+    BLDC_CALIBRATION_DEFAULT_POINTS = 8
+    BLDC_CALIBRATION_DEFAULT_SAMPLE_S = 0.25
+    BLDC_CALIBRATION_DEFAULT_SETTLE_S = 0.35
+    BLDC_CALIBRATION_MIN_POINTS = 3
+    BLDC_TACH_VALID_MAX_AGE = 0.5
     CONTROL_DEADBAND_RPM = 50.
     CONTROL_LOG_INTERVAL = 0.2
     CONTROL_MIN_RPM = 150.
@@ -326,6 +332,10 @@ class MmuGearBldc:
         self.last_tach_freq = 0.
         self.last_tach_rpm = 0.
         self.last_tach_eventtime = None
+        self.calibration_map_points = []
+        self.map_mode = 'linear'
+        self.map_fallback_reason = 'map_missing'
+        self.last_map_log_state = None
 
         self.kick_start_time = config.getfloat('kick_start_time', 0.1, minval=0.)
         self.sync_speed_factor = config.getfloat('sync_speed_factor', 0.694, above=0.)
@@ -445,6 +455,208 @@ class MmuGearBldc:
             "BLDC_PROCESS_MOVE: print_time=%.3f start=%.3f cruise=%.3f end=%.3f accel_t=%.4f cruise_t=%.4f decel_t=%.4f unit=%s"
             % (print_time, start_speed, cruise_speed, end_speed, move.accel_t, move.cruise_t, move.decel_t, self.section_name)
         )
+
+    def _log_map_state(self, mode, reason):
+        state = (mode, reason, len(self.calibration_map_points))
+        if state == self.last_map_log_state:
+            return
+        self.last_map_log_state = state
+        self.mmu.log_stepper(
+            "BLDC_MAP: mode=%s reason=%s points=%d unit=%s"
+            % (mode, reason, len(self.calibration_map_points), self.section_name)
+        )
+
+    def _coerce_float(self, value):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _normalize_calibration_points(self, raw_points):
+        if not isinstance(raw_points, list):
+            return None, 'points_type'
+
+        pairs = []
+        for point in raw_points:
+            if not isinstance(point, dict):
+                return None, 'point_type'
+            pwm = self._coerce_float(point.get('pwm'))
+            rpm = self._coerce_float(point.get('rpm'))
+            if pwm is None or rpm is None:
+                return None, 'point_value_type'
+            if pwm < self.pwm_min - self.ZERO_EPSILON or pwm > self.pwm_max + self.ZERO_EPSILON:
+                return None, 'pwm_range'
+            if rpm <= self.ZERO_EPSILON or rpm > self.max_rpm + self.ZERO_EPSILON:
+                return None, 'rpm_range'
+            pairs.append((pwm, rpm))
+
+        if not pairs:
+            return None, 'points_empty'
+
+        pwm_buckets = {}
+        for pwm, rpm in pairs:
+            key = round(pwm, 6)
+            pwm_buckets.setdefault(key, []).append(rpm)
+        deduped_by_pwm = []
+        for key in sorted(pwm_buckets.keys()):
+            values = pwm_buckets[key]
+            deduped_by_pwm.append((key, sum(values) / len(values)))
+
+        rpm_buckets = {}
+        for pwm, rpm in deduped_by_pwm:
+            key = round(rpm, 1)
+            rpm_buckets.setdefault(key, []).append(pwm)
+
+        normalized = []
+        for rpm in sorted(rpm_buckets.keys()):
+            pwm_values = rpm_buckets[rpm]
+            normalized.append({'pwm': round(sum(pwm_values) / len(pwm_values), 6), 'rpm': rpm})
+        normalized.sort(key=lambda point: point['pwm'])
+
+        if len(normalized) < self.BLDC_CALIBRATION_MIN_POINTS:
+            return None, 'insufficient_points'
+
+        return normalized, None
+
+    def has_tachometer(self):
+        return self.tachometer is not None
+
+    def set_calibration_map(self, payload, source='runtime'):
+        if payload is None:
+            self.calibration_map_points = []
+            self.map_mode = 'linear'
+            self.map_fallback_reason = 'map_missing'
+            self._log_map_state(self.map_mode, self.map_fallback_reason)
+            return False, 'map_missing'
+
+        if not isinstance(payload, dict):
+            return False, 'payload_type'
+
+        points, reason = self._normalize_calibration_points(payload.get('points', []))
+        if reason is not None:
+            return False, reason
+
+        self.calibration_map_points = points
+        self.map_mode = 'mapped'
+        self.map_fallback_reason = 'none'
+        self._log_map_state(self.map_mode, '%s_loaded' % source)
+        return True, None
+
+    def get_calibration_map_payload(self):
+        if not self.calibration_map_points:
+            return None
+        return {'points': [dict(point) for point in self.calibration_map_points]}
+
+    def _get_tach_age(self):
+        if self.last_tach_eventtime is None:
+            return None
+        return max(0., self._get_current_print_time() - self.last_tach_eventtime)
+
+    def _is_tach_sample_valid(self):
+        if self.tachometer is None:
+            return False, 'no_tachometer'
+        tach_age = self._get_tach_age()
+        if tach_age is None:
+            return False, 'tach_missing'
+        if tach_age > self.BLDC_TACH_VALID_MAX_AGE:
+            return False, 'tach_stale'
+        if self.last_tach_rpm <= self.ZERO_EPSILON:
+            return False, 'tach_zero'
+        return True, 'ok'
+
+    def _is_map_usable(self):
+        if not self.calibration_map_points:
+            return False, 'map_missing'
+        if self.tachometer is None:
+            return False, 'tachometer_missing'
+        return True, 'mapped'
+
+    def _rpm_to_pwm_linear(self, rpm):
+        if rpm <= self.ZERO_EPSILON:
+            return 0.
+        ratio = min(rpm / self.max_rpm, 1.)
+        return self.pwm_min + (self.pwm_max - self.pwm_min) * ratio
+
+    def _rpm_to_pwm_mapped(self, rpm):
+        points = self.calibration_map_points
+        if not points:
+            return 0.
+
+        min_point = min(points, key=lambda point: point['rpm'])
+        max_point = max(points, key=lambda point: point['rpm'])
+        if rpm <= min_point['rpm']:
+            return min_point['pwm']
+        if rpm >= max_point['rpm']:
+            return max_point['pwm']
+
+        nearest = None
+        nearest_delta = None
+        for point in points:
+            delta = abs(point['rpm'] - rpm)
+            if nearest is None or delta < nearest_delta - self.ZERO_EPSILON:
+                nearest = point
+                nearest_delta = delta
+            elif abs(delta - nearest_delta) <= self.ZERO_EPSILON and point['pwm'] > nearest['pwm']:
+                nearest = point
+
+        return nearest['pwm'] if nearest is not None else self._rpm_to_pwm_linear(rpm)
+
+    def calibrate_pwm_rpm_map(self, point_count=None):
+        if self.tachometer is None:
+            raise MmuError("BLDC tachometer unavailable for calibration in [%s]" % self.section_name)
+
+        point_count = point_count if point_count is not None else self.BLDC_CALIBRATION_DEFAULT_POINTS
+
+        if point_count < self.BLDC_CALIBRATION_MIN_POINTS:
+            raise MmuError(
+                "BLDC calibration requires at least %d points" % self.BLDC_CALIBRATION_MIN_POINTS
+            )
+
+        if point_count == 1:
+            sweep_pwm = [self.pwm_max]
+        else:
+            step = (self.pwm_max - self.pwm_min) / float(point_count - 1)
+            sweep_pwm = [self.pwm_min + (step * i) for i in range(point_count)]
+
+        raw_points = []
+        try:
+            self.stop()
+            self.mmu.movequeues_wait()
+            for pwm in sweep_pwm:
+                print_time = self._get_print_time(self.mcu_pwm_pin.get_mcu())
+                self._safe_set_direction(True, print_time)
+                self._send_pin(self.mcu_pwm_pin, pwm, print_time)
+                self.mmu.movequeues_wait(toolhead=False)
+                self.mmu.movequeues_dwell(self.BLDC_CALIBRATION_DEFAULT_SETTLE_S, toolhead=False)
+                self.mmu.movequeues_wait(toolhead=False)
+                self.mmu.movequeues_dwell(self.BLDC_CALIBRATION_DEFAULT_SAMPLE_S, toolhead=False)
+                self.mmu.movequeues_wait(toolhead=False)
+
+                valid, reason = self._is_tach_sample_valid()
+                if not valid:
+                    self.mmu.log_warning(
+                        "Skipping BLDC calibration sample pwm=%.4f: %s (%s)"
+                        % (pwm, reason, self.section_name)
+                    )
+                    continue
+
+                raw_points.append({'pwm': round(pwm, 6), 'rpm': round(self.last_tach_rpm, 1)})
+                self.mmu.log_stepper(
+                    "BLDC_CALIBRATE: sample pwm=%.4f rpm=%.1f unit=%s"
+                    % (pwm, self.last_tach_rpm, self.section_name)
+                )
+        finally:
+            self.stop()
+            self.mmu.movequeues_wait(toolhead=False)
+
+        payload = {'points': raw_points}
+        valid, reason = self.set_calibration_map(payload, source='calibration')
+        if not valid:
+            raise MmuError(
+                "BLDC calibration failed for [%s]: %s (valid points=%d)"
+                % (self.section_name, reason, len(raw_points))
+            )
+        return self.get_calibration_map_payload()
 
     def _set_control_state(self, reason, correction_pwm=0., error_rpm=None):
         self.control_reason = reason
@@ -699,10 +911,17 @@ class MmuGearBldc:
         )
 
     def _rpm_to_pwm(self, rpm):
-        if rpm <= self.ZERO_EPSILON:
-            return 0.
-        ratio = min(rpm / self.max_rpm, 1.)
-        return self.pwm_min + (self.pwm_max - self.pwm_min) * ratio
+        map_usable, reason = self._is_map_usable()
+        if map_usable:
+            self.map_mode = 'mapped'
+            self.map_fallback_reason = 'none'
+            self._log_map_state(self.map_mode, reason)
+            return self._rpm_to_pwm_mapped(rpm)
+
+        self.map_mode = 'linear'
+        self.map_fallback_reason = reason
+        self._log_map_state(self.map_mode, reason)
+        return self._rpm_to_pwm_linear(rpm)
 
     def _set_rpm(self, rpm, forward, source='move', linear_speed=0., print_time=None):
         requested_rpm = rpm
@@ -782,6 +1001,9 @@ class MmuGearBldc:
             'control_correction_pwm': self.control_correction_pwm,
             'integral_correction_pwm': self.integral_correction_pwm,
             'effective_pwm': self.last_effective_pwm,
+            'map_mode': self.map_mode,
+            'map_points': len(self.calibration_map_points),
+            'map_fallback_reason': self.map_fallback_reason,
         }
 
     def _handle_synced(self):

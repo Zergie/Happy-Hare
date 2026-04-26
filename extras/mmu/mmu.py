@@ -186,6 +186,7 @@ class Mmu:
     # Calibration data
     VARS_MMU_ENCODER_RESOLUTION       = "mmu_encoder_resolution"
     VARS_MMU_GEAR_ROTATION_DISTANCES  = "mmu_gear_rotation_distances"
+    VARS_MMU_BLDC_MAP                 = "mmu_bldc_map"
     VARS_MMU_CALIB_BOWDEN_LENGTHS     = "mmu_calibration_bowden_lengths" # Per-gate calibrated bowden lengths
     VARS_MMU_CALIB_BOWDEN_HOME        = "mmu_calibration_bowden_home"    # Was encoder, gate or gear sensor used as reference point
     VARS_MMU_CALIB_BOWDEN_LENGTH      = "mmu_calibration_bowden_length"  # DEPRECATED (for upgrade only)
@@ -587,6 +588,7 @@ class Mmu:
         self.gcode.register_command('MMU_CALIBRATE_GATES', self.cmd_MMU_CALIBRATE_GATES, desc = self.cmd_MMU_CALIBRATE_GATES_help)
         self.gcode.register_command('MMU_CALIBRATE_TOOLHEAD', self.cmd_MMU_CALIBRATE_TOOLHEAD, desc = self.cmd_MMU_CALIBRATE_TOOLHEAD_help)
         self.gcode.register_command('MMU_CALIBRATE_PSENSOR', self.cmd_MMU_CALIBRATE_PSENSOR, desc = self.cmd_MMU_CALIBRATE_PSENSOR_help)
+        self.gcode.register_command('MMU_CALIBRATE_BLDC', self.cmd_MMU_CALIBRATE_BLDC, desc = self.cmd_MMU_CALIBRATE_BLDC_help)
 
         # Motor control
         self.gcode.register_command('MMU_MOTORS_OFF', self.cmd_MMU_MOTORS_OFF, desc = self.cmd_MMU_MOTORS_OFF_help)
@@ -895,6 +897,9 @@ class Mmu:
             self.log_warning("Warning: Gear rotation distances not found in mmu_vars.cfg. Probably not calibrated yet")
             self.rotation_distances = [-1] * self.num_gates
         self.save_variables.allVariables[self.VARS_MMU_GEAR_ROTATION_DISTANCES] = self.rotation_distances
+
+        # Load BLDC PWM->RPM calibration map data (calibration set with MMU_CALIBRATE_BLDC) ---------------
+        self._load_bldc_calibration_maps()
 
         # Load encoder configuration (calibration set with MMU_CALIBRATE_ENCODER) ---------------------------
         self.encoder_resolution = 1.0
@@ -2739,6 +2744,57 @@ class Mmu:
         finally:
             self.calibrating = False
 
+    cmd_MMU_CALIBRATE_BLDC_help = "Calibrate BLDC PWM->RPM map using fixed tachometer sampling sweep"
+    cmd_MMU_CALIBRATE_BLDC_param_help = (
+        "MMU_CALIBRATE_BLDC: %s\n" % cmd_MMU_CALIBRATE_BLDC_help
+        + "MOTOR = [0..n] BLDC unit index (0-based); default uses selected gate's unit\n"
+        + "POINTS = [3..40] Number of PWM sweep points (default 8)\n"
+        + "SAVE = [0|1] Save calibration map to mmu_vars.cfg (default 1)"
+    )
+    def cmd_MMU_CALIBRATE_BLDC(self, gcmd):
+        self.log_to_file(gcmd.get_commandline())
+        if self.check_if_disabled(): return
+        if self.check_if_printing(): return
+        if self.check_if_bypass(): return
+
+        if gcmd.get_int('HELP', 0, minval=0, maxval=1):
+            self.log_always(self.format_help(self.cmd_MMU_CALIBRATE_BLDC_param_help), color=True)
+            return
+
+        motor = gcmd.get_int('MOTOR', -1, minval=-1, maxval=self.mmu_machine.num_units - 1)
+        if motor == -1:
+            if self.check_if_gate_not_valid(): return
+            unit_index = self.find_unit_by_gate(self.gate_selected)
+        else:
+            unit_index = motor
+
+        bldc = self.bldc_by_unit.get(unit_index)
+        if bldc is None:
+            raise gcmd.error("Unit %d is not routed to a BLDC motor" % (unit_index + 1))
+        if not bldc.has_tachometer():
+            raise gcmd.error("BLDC tachometer unavailable on unit %d" % (unit_index + 1))
+
+        points = gcmd.get_int('POINTS', bldc.BLDC_CALIBRATION_DEFAULT_POINTS, minval=bldc.BLDC_CALIBRATION_MIN_POINTS, maxval=40)
+        save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
+
+        try:
+            with self.wrap_sync_gear_to_extruder():
+                with self._wrap_suspend_filament_monitoring():
+                    self.calibrating = True
+                    payload = bldc.calibrate_pwm_rpm_map(points)
+                    point_count = len(payload.get('points', []))
+                    self.log_always(
+                        "BLDC calibration captured %d valid points for unit %d"
+                        % (point_count, unit_index + 1)
+                    )
+                    if save:
+                        self._save_bldc_calibration_map_for_unit(unit_index, bldc)
+                        self.log_always("Saved BLDC calibration map to mmu_vars.cfg")
+        except MmuError as ee:
+            self.handle_mmu_error(str(ee))
+        finally:
+            self.calibrating = False
+
     # Start: Test gate should already be selected
     # End: Filament will unload
     cmd_MMU_CALIBRATE_TOOLHEAD_help = "Automated measurement of key toolhead parameters"
@@ -3494,6 +3550,56 @@ class Mmu:
             else:
                 bldc_cfg = config.getsection(section_name)
                 self.bldc_by_unit[unit.unit_index] = MmuGearBldc(bldc_cfg, self, unit.first_gate, unit.num_gates)
+
+    def _get_bldc_map_unit_key(self, unit_index):
+        return "unit_%d" % int(unit_index)
+
+    def _load_bldc_calibration_maps(self):
+        if not self.has_bldc_gear() or not self.save_variables:
+            return
+
+        persisted = self.save_variables.allVariables.get(self.VARS_MMU_BLDC_MAP, {})
+        if not isinstance(persisted, dict):
+            self.log_warning("Warning: Invalid BLDC map payload in mmu_vars.cfg. Expected dict. Using linear fallback")
+            persisted = {}
+
+        normalized = {}
+        processed = set()
+        for unit_index, bldc in self.bldc_by_unit.items():
+            if id(bldc) in processed:
+                continue
+            processed.add(id(bldc))
+
+            map_key = self._get_bldc_map_unit_key(unit_index)
+            payload = persisted.get(map_key)
+            if payload is None:
+                continue
+
+            valid, reason = bldc.set_calibration_map(payload, source='persisted')
+            if not valid:
+                self.log_warning(
+                    "Warning: Invalid BLDC map for %s (%s). Falling back to linear conversion"
+                    % (map_key, reason)
+                )
+                continue
+
+            normalized[map_key] = bldc.get_calibration_map_payload()
+            self.log_debug(
+                "Loaded BLDC calibration map for %s (%d points)"
+                % (map_key, len(normalized[map_key].get('points', [])))
+            )
+
+        self.save_variables.allVariables[self.VARS_MMU_BLDC_MAP] = normalized
+
+    def _save_bldc_calibration_map_for_unit(self, unit_index, bldc):
+        existing = self.save_variables.allVariables.get(self.VARS_MMU_BLDC_MAP, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        payload = bldc.get_calibration_map_payload()
+        if payload is None:
+            raise MmuError("BLDC calibration map payload missing")
+        existing[self._get_bldc_map_unit_key(unit_index)] = payload
+        self.save_variable(self.VARS_MMU_BLDC_MAP, existing, write=True)
 
     def _get_bldc_for_gate(self, gate=None):
         if not self.has_bldc_gear():
