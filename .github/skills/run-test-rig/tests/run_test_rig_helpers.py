@@ -220,11 +220,16 @@ def get_bldc_control_entries(log_text: str, unit: str = TARGET_UNIT) -> list[Bld
     return entries
 
 
+def _is_pwm_pin_event(event: BldcPinEvent) -> bool:
+    msg = event.message
+    return "PWM" in msg or msg.startswith("kick ") or msg.startswith("discard ")
+
+
 def get_bldc_runtime_seconds(log_text: str, unit: str = TARGET_UNIT) -> RuntimeWindow:
     timed_events = [
         event
         for event in get_bldc_pin_events(log_text, unit=unit)
-        if event.time is not None and "PWM" in event.message
+        if event.time is not None and _is_pwm_pin_event(event)
     ]
     start_event = next((event for event in timed_events if event.applied > 0.0), None)
     if start_event is None:
@@ -237,6 +242,32 @@ def get_bldc_runtime_seconds(log_text: str, unit: str = TARGET_UNIT) -> RuntimeW
     if stop_event is None:
         raise RuntimeError(f"No zero BLDC_SET_PIN PWM event after first non-zero event found for unit '{unit}'.")
 
+    return RuntimeWindow(
+        runtime_seconds=float(stop_event.time - start_event.time),
+        start_event=start_event,
+        stop_event=stop_event,
+    )
+
+
+def get_bldc_terminal_runtime_seconds(log_text: str, unit: str = TARGET_UNIT) -> RuntimeWindow:
+    timed_events = [
+        event
+        for event in get_bldc_pin_events(log_text, unit=unit)
+        if event.time is not None and _is_pwm_pin_event(event)
+    ]
+    start_event = next((event for event in timed_events if event.applied > 0.0), None)
+    if start_event is None:
+        raise RuntimeError(f"No non-zero BLDC_SET_PIN PWM event with time found for unit '{unit}'.")
+
+    zero_events_after_start = [
+        event
+        for event in timed_events
+        if event.time is not None and event.time > start_event.time and event.applied <= 0.0
+    ]
+    if not zero_events_after_start:
+        raise RuntimeError(f"No terminal zero BLDC_SET_PIN PWM event found for unit '{unit}'.")
+
+    stop_event = zero_events_after_start[-1]
     return RuntimeWindow(
         runtime_seconds=float(stop_event.time - start_event.time),
         start_event=start_event,
@@ -288,7 +319,7 @@ def assert_bldc_tach_control_pwm_raised_to_max(log_text: str, unit: str = TARGET
         )
 
     pin_events = get_bldc_pin_events(log_text, unit=unit)
-    pwm_pin_events = [event for event in pin_events if "PWM" in event.message]
+    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
     saturated_pin = [event for event in pwm_pin_events if event.applied >= 0.999]
     if not saturated_pin:
         pin_preview = [event.line for event in pwm_pin_events[:5]]
@@ -299,9 +330,91 @@ def assert_bldc_tach_control_pwm_raised_to_max(log_text: str, unit: str = TARGET
         )
 
 
+def assert_bldc_pulsed_control_pwm_raised_to_max(log_text: str, unit: str = TARGET_UNIT) -> None:
+    control_entries = get_bldc_control_entries(log_text, unit=unit)
+    saturated_control = [
+        entry for entry in control_entries
+        if entry.reason in ("pulsed_mode", "pulsed_active") and entry.applied_pwm >= 0.999
+    ]
+    if not saturated_control:
+        preview = [entry.line for entry in control_entries[:8]]
+        raise AssertionError(
+            f"No pulsed BLDC_CONTROL saturation found for unit '{unit}'. "
+            "Expected pulsed_mode or pulsed_active with applied_pwm=1.0000. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    pin_events = get_bldc_pin_events(log_text, unit=unit)
+    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
+    saturated_pin = [event for event in pwm_pin_events if event.applied >= 0.999]
+    if not saturated_pin:
+        pin_preview = [event.line for event in pwm_pin_events[:8]]
+        raise AssertionError(
+            f"No pulsed BLDC_SET_PIN saturation found for unit '{unit}'. "
+            "Expected applied=1.0000 on PWM pin during pulsed move. "
+            f"Preview:\n{chr(10).join(pin_preview)}"
+        )
+
+
+def assert_bldc_starts_pulsed_and_ends_active_at_max_pwm(log_text: str, unit: str = TARGET_UNIT) -> None:
+    control_entries = get_bldc_control_entries(log_text, unit=unit)
+    transition_entries = [
+        entry for entry in control_entries
+        if entry.reason in ("pulsed_mode", "pulsed_active", "active")
+    ]
+    if not transition_entries:
+        raise AssertionError(f"No BLDC_CONTROL transition entries found for unit '{unit}'.")
+
+    first_transition = transition_entries[0]
+    if first_transition.reason not in ("pulsed_mode", "pulsed_active"):
+        preview = [entry.line for entry in transition_entries[:8]]
+        raise AssertionError(
+            f"BLDC transition did not start in pulsed mode for unit '{unit}'. "
+            f"Observed first reason={first_transition.reason}. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    active_entries = [entry for entry in transition_entries if entry.reason == "active"]
+    if not active_entries:
+        preview = [entry.line for entry in transition_entries[:8]]
+        raise AssertionError(
+            f"BLDC transition never reached active mode for unit '{unit}'. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    first_active_index = next(
+        index for index, entry in enumerate(transition_entries)
+        if entry.reason == "active"
+    )
+    if any(entry.reason in ("pulsed_mode", "pulsed_active") for entry in transition_entries[first_active_index + 1:]):
+        preview = [entry.line for entry in transition_entries[max(0, first_active_index - 3):first_active_index + 8]]
+        raise AssertionError(
+            f"BLDC transition returned to pulsed mode after entering active mode for unit '{unit}'. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    last_transition = transition_entries[-1]
+    if last_transition.reason != "active" or last_transition.applied_pwm < 0.999:
+        preview = [entry.line for entry in transition_entries[-8:]]
+        raise AssertionError(
+            f"BLDC transition did not end in active mode at max PWM for unit '{unit}'. "
+            f"Observed final reason={last_transition.reason} applied_pwm={last_transition.applied_pwm:.4f}. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    pin_events = get_bldc_pin_events(log_text, unit=unit)
+    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
+    if not any(event.applied >= 0.999 for event in pwm_pin_events):
+        pin_preview = [event.line for event in pwm_pin_events[-8:]]
+        raise AssertionError(
+            f"No max-PWM BLDC_SET_PIN event found for unit '{unit}' during transition. "
+            f"Preview:\n{chr(10).join(pin_preview)}"
+        )
+
+
 def assert_bldc_tach_control_pwm_raised(log_text: str, unit: str = TARGET_UNIT) -> None:
     pin_events = get_bldc_pin_events(log_text, unit=unit)
-    pwm_pin_events = [event for event in pin_events if "PWM" in event.message]
+    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
     if not pwm_pin_events:
         raise AssertionError(f"No BLDC_SET_PIN PWM events found for unit '{unit}'.")
 
@@ -319,6 +432,87 @@ def assert_bldc_tach_control_pwm_raised(log_text: str, unit: str = TARGET_UNIT) 
             f"BLDC_SET_PIN PWM never rose for unit '{unit}' (initial={initial_pwm:.4f}). "
             f"Preview:\n{chr(10).join(pin_preview)}"
         )
+
+
+def assert_bldc_pulsed_mode_present(log_text: str, unit: str = TARGET_UNIT) -> None:
+    control_entries = get_bldc_control_entries(log_text, unit=unit)
+    pulsed_entries = [
+        entry for entry in control_entries
+        if entry.reason in ("pulsed_mode", "pulsed_active")
+    ]
+    if pulsed_entries:
+        return
+
+    preview = [entry.line for entry in control_entries[:8]]
+    raise AssertionError(
+        f"No pulsed BLDC_CONTROL evidence found for unit '{unit}'. "
+        f"Expected reason=pulsed_mode or reason=pulsed_active. "
+        f"Preview:\n{chr(10).join(preview)}"
+    )
+
+
+def assert_bldc_pulse_edges_and_clean_stop(log_text: str, unit: str = TARGET_UNIT) -> None:
+    pin_events = get_bldc_pin_events(log_text, unit=unit)
+    pwm_events = [event for event in pin_events if _is_pwm_pin_event(event)]
+    if len(pwm_events) < 3:
+        preview = [event.line for event in pwm_events]
+        raise AssertionError(
+            f"Too few BLDC_SET_PIN PWM events for pulse verification on unit '{unit}'. "
+            f"Observed={len(pwm_events)}. Preview:\n{chr(10).join(preview)}"
+        )
+
+    non_zero_values = [event.applied for event in pwm_events if event.applied > 0.0]
+    if len(non_zero_values) < 2:
+        preview = [event.line for event in pwm_events[:8]]
+        raise AssertionError(
+            f"Missing repeated non-zero PWM pulse edges for unit '{unit}'. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    zero_events = [event for event in pwm_events if event.applied <= 0.0]
+    if not zero_events:
+        preview = [event.line for event in pwm_events[-8:]]
+        raise AssertionError(
+            f"Missing terminal zero-PWM stop event for unit '{unit}'. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+    # Require OFF edge during pulsing (not only final stop), so OFF remains true zero.
+    first_non_zero_index = next((idx for idx, event in enumerate(pwm_events) if event.applied > 0.0), None)
+    last_event_index = len(pwm_events) - 1
+    has_intermediate_zero = any(
+        event.applied <= 0.0 and first_non_zero_index is not None and first_non_zero_index < idx < last_event_index
+        for idx, event in enumerate(pwm_events)
+    )
+    if not has_intermediate_zero:
+        preview = [event.line for event in pwm_events[:12]]
+        raise AssertionError(
+            f"No intermediate zero OFF edge found for unit '{unit}'. "
+            f"Expected pulsed OFF transitions before final stop. "
+            f"Preview:\n{chr(10).join(preview)}"
+        )
+
+
+def assert_bldc_runtime_matches_move(
+    log_text: str,
+    move_mm: float,
+    speed_mm_s: float,
+    tolerance_s: float,
+    unit: str = TARGET_UNIT,
+) -> None:
+    if speed_mm_s <= 0.0:
+        raise AssertionError("speed_mm_s must be > 0 for runtime check")
+
+    runtime = get_bldc_runtime_seconds(log_text, unit=unit)
+    expected_runtime_s = move_mm / speed_mm_s
+    evidence = [runtime.start_event.line, runtime.stop_event.line]
+    assert_value_within_tolerance(
+        label=f"BLDC runtime for MOVE={move_mm} SPEED={speed_mm_s}",
+        observed=runtime.runtime_seconds,
+        expected=expected_runtime_s,
+        tolerance=tolerance_s,
+        evidence_lines=evidence,
+    )
 
 
 def assert_value_within_tolerance(label: str, observed: float, expected: float, tolerance: float, evidence_lines: list[str] | None = None) -> None:
