@@ -442,7 +442,7 @@ class MmuCalibrationManager:
             mean = (float(mean_pos) + float(mean_neg)) / 2
             ratio = mean / length
             if self.mmu.has_bldc_gear(gate):
-                bldc = self.mmu._get_bldc_for_gate(gate)
+                bldc = self.mmu.get_bldc_for_gate(gate)
                 current_rd = bldc.get_rotation_distance() if bldc is not None else self.mmu.default_rotation_distance
             else:
                 current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]
@@ -515,7 +515,7 @@ class MmuCalibrationManager:
             ):
                 if direction in [self.mmu.DIRECTION_LOAD, self.mmu.DIRECTION_UNLOAD]:
                     if self.mmu.has_bldc_gear(self.mmu.gate_selected):
-                        bldc = self.mmu._get_bldc_for_gate(self.mmu.gate_selected)
+                        bldc = self.mmu.get_bldc_for_gate(self.mmu.gate_selected)
                         current_rd = bldc.get_rotation_distance() if bldc is not None else self.mmu.default_rotation_distance
                     else:
                         current_rd = self.mmu.gear_rail.steppers[0].get_rotation_distance()[0]

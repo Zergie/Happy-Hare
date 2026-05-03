@@ -2557,7 +2557,7 @@ class Mmu:
 
             if measured > 0:
                 if self.has_bldc_gear(gate):
-                    bldc = self._get_bldc_for_gate(gate)
+                    bldc = self.get_bldc_for_gate(gate)
                     current_rd = bldc.get_rotation_distance() if bldc is not None else self.default_rotation_distance
                     gear_type = "BLDC"
                 else:
@@ -2770,12 +2770,31 @@ class Mmu:
 
         bldc = self.bldc_by_unit.get(unit_index)
         if bldc is None:
-            raise gcmd.error("Unit %d is not routed to a BLDC motor" % (unit_index + 1))
-        if not bldc.has_tachometer():
-            raise gcmd.error("BLDC tachometer unavailable on unit %d" % (unit_index + 1))
+            raise gcmd.error("Unit %d is not routed to a BLDC motor" % (unit_index))
 
-        points = gcmd.get_int('POINTS', bldc.BLDC_CALIBRATION_DEFAULT_POINTS, minval=bldc.BLDC_CALIBRATION_MIN_POINTS, maxval=40)
+        points = gcmd.get_int('POINTS', bldc.CALIBRATION_DEFAULT_POINTS, minval=bldc.CALIBRATION_MIN_POINTS, maxval=40)
         save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
+
+        def _format_bldc_calibration_map(unit_index, payload):
+            points = payload.get('points', []) if isinstance(payload, dict) else []
+            if not points:
+                return "BLDC calibration map for unit %d has no valid points" % (unit_index)
+
+            points = sorted(points, key=lambda p: p.get('pwm', 0.))
+            lines = [
+                "BLDC calibration map (unit %d):" % (unit_index),
+                "+------+----------+----------+",
+                "| Pt   | PWM      | RPM      |",
+                "+------+----------+----------+",
+            ]
+
+            for idx, point in enumerate(points, start=1):
+                pwm = point.get('pwm', 0.)
+                rpm = point.get('rpm', 0.)
+                lines.append("| %4d | %8.3f | %8.1f |" % (idx, pwm, rpm))
+
+            lines.append("+------+----------+----------+")
+            return "\n".join(lines)
 
         try:
             with self.wrap_sync_gear_to_extruder():
@@ -2787,11 +2806,12 @@ class Mmu:
                         "BLDC calibration captured %d valid points for unit %d"
                         % (point_count, unit_index + 1)
                     )
+                    self.log_always(_format_bldc_calibration_map(unit_index, payload))
                     if save:
                         self._save_bldc_calibration_map_for_unit(unit_index, bldc)
                         self.log_always("Saved BLDC calibration map to mmu_vars.cfg")
-        except MmuError as ee:
-            self.handle_mmu_error(str(ee))
+        except MmuError as e:
+            self.handle_mmu_error(str(e))
         finally:
             self.calibrating = False
 
@@ -3521,7 +3541,7 @@ class Mmu:
             return False
         if gate is None:
             return True
-        return self._get_bldc_for_gate(gate) is not None
+        return self.get_bldc_for_gate(gate) is not None
 
     def _setup_bldc_gear(self, config):
         self.bldc_by_unit = {}
@@ -3601,7 +3621,7 @@ class Mmu:
         existing[self._get_bldc_map_unit_key(unit_index)] = payload
         self.save_variable(self.VARS_MMU_BLDC_MAP, existing, write=True)
 
-    def _get_bldc_for_gate(self, gate=None):
+    def get_bldc_for_gate(self, gate=None):
         if not self.has_bldc_gear():
             return None
         if gate is None:
@@ -3612,7 +3632,7 @@ class Mmu:
     def _route_bldc_sync_to_selected_gate(self, sync_enabled):
         if not self.has_bldc_gear():
             return None
-        selected = self._get_bldc_for_gate(self.gate_selected)
+        selected = self.get_bldc_for_gate(self.gate_selected)
         for bldc in set(self.bldc_by_unit.values()):
             bldc.set_sync_enabled(sync_enabled and bldc is selected)
         return selected
@@ -4706,6 +4726,9 @@ class Mmu:
                     self._set_filament_pos_state(self.FILAMENT_POS_HOMED_GATE)
                     self.trace_filament_move("Final parking", -self.gate_parking_distance)
                     self._set_filament_pos_state(self.FILAMENT_POS_UNLOADED)
+                    gear_pos = self.mmu_toolhead.get_position()
+                    gear_pos[1] = 0.
+                    self.mmu_toolhead.set_position(gear_pos)
                     return actual, self.gate_unload_buffer
 
         if self.gate_homing_endstop == self.SENSOR_ENCODER:
@@ -4722,6 +4745,9 @@ class Mmu:
                     if measured > self.encoder_min: # We expect 0, but relax the test a little (allow one pulse)
                         self.log_warning("Warning: Possible encoder malfunction (free-spinning) during final filament parking")
                     self._set_filament_pos_state(self.FILAMENT_POS_UNLOADED)
+                    gear_pos = self.mmu_toolhead.get_position()
+                    gear_pos[1] = 0.
+                    self.mmu_toolhead.set_position(gear_pos)
                     return actual, self.gate_unload_buffer
                 msg = "did not clear the encoder after moving %.1fmm" % homing_max
 
@@ -4732,6 +4758,9 @@ class Mmu:
                 self._set_filament_pos_state(self.FILAMENT_POS_HOMED_GATE)
                 self.trace_filament_move("Final parking", -self.gate_parking_distance)
                 self._set_filament_pos_state(self.FILAMENT_POS_UNLOADED)
+                gear_pos = self.mmu_toolhead.get_position()
+                gear_pos[1] = 0.
+                self.mmu_toolhead.set_position(gear_pos)
                 return actual, self.gate_unload_buffer
             msg = "did not home to sensor '%s' after moving %1.fmm" % (self.gate_homing_endstop, homing_max)
 
@@ -5821,8 +5850,9 @@ class Mmu:
 
         with self._wrap_espooler(motor, dist, speed, accel, homing_move):
             wait = wait or self._wait_for_espooler # Allow eSpooler wrapper to force wait
-            bldc = self._get_bldc_for_gate() if self.has_bldc_gear(self.gate_selected) else None
+            bldc = self.get_bldc_for_gate() if self.has_bldc_gear(self.gate_selected) else None
             bldc_active_move = bldc is not None and motor in ["gear", "gear+extruder", "synced"] and homing_move == 0
+            bldc_stopped = False
 
             # Gear rail is driving the filament
             start_pos = self.mmu_toolhead.get_position()[1]
@@ -5892,9 +5922,14 @@ class Mmu:
                     if bldc_active_move:
                         bldc.start_move(dist, speed)
                     if bldc_active_move and motor == "gear":
-                        self.reactor.pause(self.reactor.monotonic() + abs(dist) / max(speed, 1e-6))
+                        pause_time = abs(dist) / max(speed, 1e-6)
+                        if wait:
+                            pause_time += bldc.MOTION_SAMPLE_TIME
+                        self.reactor.pause(self.reactor.monotonic() + pause_time)
                         pos[1] += dist
                         self.mmu_toolhead.set_position(pos)
+                        if wait:
+                            bldc_stopped = True
                     else:
                         pos[1] += dist
                         with self.wrap_accel(accel):
@@ -5915,9 +5950,9 @@ class Mmu:
 
             self.mmu_toolhead.flush_step_generation() # TTC mitigation (TODO still required?)
             self.toolhead.flush_step_generation()     # TTC mitigation (TODO still required?)
-            if wait:
+            if wait and not (bldc_active_move and motor == "gear"):
                 self.movequeues_wait()
-            if bldc_active_move:
+            if bldc_active_move and not bldc_stopped and not (motor == "gear" and not wait):
                 bldc.stop()
 
         encoder_end = self.get_encoder_distance(dwell=encoder_dwell)
@@ -5996,8 +6031,8 @@ class Mmu:
 
         timeout = abs(dist) / speed + 0.5
         move_sign = 1. if dist >= 0. else -1.
-        target_sensor_state = (homing_move > 0)
-        bldc = self._get_bldc_for_gate()
+        target_sensor_state = homing_move > 0
+        bldc = self.get_bldc_for_gate()
         if bldc is None:
             self.log_error("BLDC motor not available for gate %d" % self.gate_selected)
             return null_rtn
@@ -6019,19 +6054,21 @@ class Mmu:
                 sensor_state, poll_source = _read_endstop_state()
                 if sensor_state is not None and sensor_state == target_sensor_state:
                     homed = True
+                    bldc.stop()
                     break
                 self.reactor.pause(self.reactor.monotonic() + poll_interval)
 
             time_elapsed = min(self.reactor.monotonic() - start_time, timeout)
             moved = min(abs(dist), speed * time_elapsed)
             actual = move_sign * moved
-            if motor != "gear+extruder":
-                # For gear-only moves, manually update position since BLDC bypasses stepper
-                pos[1] = init_pos + actual
-                self.mmu_toolhead.set_position(pos)
+            pos[1] = init_pos + actual
+            self.mmu_toolhead.set_position(pos)
             halt_pos = self.mmu_toolhead.get_position()
         finally:
-            bldc.stop()
+            if homed and motor == "gear":
+                bldc.brake_to_stop()
+            else:
+                bldc.stop()
             if motor == "gear+extruder":
                 self.mmu_toolhead.sync(MmuToolHead.GEAR_ONLY)
                 self._restore_gear_current()
@@ -6817,7 +6854,7 @@ class Mmu:
         if rd:
             self.log_trace("Setting gear motor rotation distance: %.4f" % rd)
             if self.has_bldc_gear(self.gate_selected):
-                bldc = self._get_bldc_for_gate()
+                bldc = self.get_bldc_for_gate()
                 if bldc is not None:
                     bldc.set_rotation_distance(rd)
             elif self.gear_rail.steppers:
@@ -9327,6 +9364,9 @@ class Mmu:
                                     except MmuError as ee:
                                         self._set_gate_status(gate, self.GATE_EMPTY)
                                         self._set_filament_pos_state(self.FILAMENT_POS_UNLOADED, silent=True)
+                                        gear_pos = self.mmu_toolhead.get_position()
+                                        gear_pos[1] = 0.
+                                        self.mmu_toolhead.set_position(gear_pos)
                                         if tool >= 0:
                                             msg = "Tool T%d on gate %d marked EMPTY" % (tool, gate)
                                         else:
@@ -9416,4 +9456,3 @@ class Mmu:
 
 def load_config(config):
     return Mmu(config)
-
