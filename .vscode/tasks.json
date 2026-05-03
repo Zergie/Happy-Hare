@@ -98,12 +98,17 @@
         },
         {
             "label": "Get klippy.log from Test Rig",
-            "type": "shell",
-            "command": [
-                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
-                "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
-                "}"
+            "type": "process",
+            "command": ".\\.venv\\Scripts\\python.exe",
+            "args": [
+                ".\\.github\\skills\\run-test-rig\\download_klippy_log.py"
             ],
+            // "type": "shell",
+            // "command": [
+            //     "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+            //     "scp klippy-test:/home/user/printer_data/logs/klippy.log \"C:\\git\\YAMMU\\Firmware\\Happy-Hare\\.github\\skills\\run-test-rig\\klippy.log\";",
+            //     "}"
+            // ],
             "problemMatcher": [],
             "group": {
                 "kind": "build",

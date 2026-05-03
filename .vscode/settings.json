@@ -6,6 +6,9 @@
   },
   "python.linting.enabled": true,
   "python.linting.pylintEnabled": true,
+  "pylint.path": [
+    "C:\\git\\klipper\\klippy\\extras"
+  ],
   "python.testing.pytestArgs": [
     ".github\\skills\\run-test-rig\\tests"
   ],
