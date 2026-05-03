@@ -1,5 +1,5 @@
 ---
-description: "BLDC implementation guardrails for Happy-Hare: module boundaries, pin-write queue rules, sync-mode behavior, and lookup_object contract safety."
+description: "BLDC implementation guardrails for Happy-Hare: module boundaries, sync-mode behavior, lookup_object contract safety, and klipper/kalico compatibility."
 applyTo: "extras/**/*.py"
 ---
 
@@ -11,14 +11,12 @@ Apply these rules for BLDC-related work in Happy-Hare Python files.
 - Keep BLDC control logic in `extras/mmu/mmu_gear_bldc.py`.
 - Keep `extras/mmu/mmu.py` focused on integration/orchestration.
 - Do not edit Klipper source files for BLDC feature implementation.
+- Do not edit Kalico source files for BLDC feature implementation.
+- All changes must be compatible with Klipper and Kalico.
 
-## Output Pin and Queue Rules
-- Use queued pin writes only for BLDC pwm/digital_out control paths.
-- Do not call `set_pwm` or `set_digital` outside queue callback functions.
-- Use `output_pin.GCodeRequestQueue` when available.
-- Fallback to `GCodeRequestQueue` from `extras/mmu_espooler.py` when needed.
-- Name queue map `self.gcrqs`.
-- Allow exactly one `GCodeRequestQueue` instance per MCU in `self.gcrqs` (reuse existing queue, no duplicates).
+## Output Pin Control
+- Do not call `set_pwm` or `set_digital` directly during motion.
+- Use proper queuing mechanisms to ensure pin writes are synchronized with motion commands.
 
 ## Runtime and Naming Contracts
 - Treat names passed to `lookup_object(...)` as fixed contracts.

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import atexit
+import importlib.util
 import math
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 RUN_TEST_RIG_ROOT = Path(__file__).resolve().parent.parent
 STARTUP_GCODE_PATH = RUN_TEST_RIG_ROOT / "startup.gcode"
@@ -18,6 +21,7 @@ UNKNOWN_COMMAND_PATTERN = re.compile(r"Unknown command:")
 TRACEBACK_HEADER_PATTERN = re.compile(r"Traceback \(most recent call last\)")
 BENIGN_BLOCKING_IO_PATTERN = re.compile(r"BlockingIOError: \[Errno 11\] Resource temporarily unavailable")
 BENIGN_RESPOND_RAW_PATTERN = re.compile(r"_respond_raw")
+TIMER_TOO_CLOSE_PATTERN = re.compile(r"Timer too close")
 BLDC_TACH_PATTERN = re.compile(
     r"(?m)^.*BLDC_TACH: freq=(?P<freq>[0-9.]+) rpm=(?P<rpm>[0-9.]+)(?: time=(?P<time>[0-9.]+))?.* unit=(?P<unit>.+)$"
 )
@@ -78,6 +82,22 @@ class BldcControlEntry:
     unit: str
 
 
+@dataclass
+class RunTestRigSession:
+    invoke_module: Any
+    process: subprocess.Popen[str]
+    client: Any
+    log_offset: int = 0
+
+
+SESSION_REUSE_DISABLED = "disabled"
+SESSION_REUSE_ENABLED = "enabled"
+
+_session_reuse_mode = SESSION_REUSE_DISABLED
+_active_session: RunTestRigSession | None = None
+
+
+
 def backup_run_test_rig_startup_gcode() -> str:
     if STARTUP_GCODE_PATH.exists():
         return STARTUP_GCODE_PATH.read_text(encoding="utf-8")
@@ -111,25 +131,136 @@ def invoke_run_test_rig_export() -> str:
     return output
 
 
+def _load_module_from_path(module_name: str, module_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module '{module_name}' from path: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_invoke_module_from_path():
+    return _load_module_from_path("run_test_rig_invoke", INVOKE_SCRIPT_PATH)
+
+
+def _load_moonraker_module_from_path():
+    moonraker_path = RUN_TEST_RIG_ROOT / "moonraker_client.py"
+    return _load_module_from_path("run_test_rig_moonraker_client", moonraker_path)
+
+
+def set_run_test_rig_session_reuse(enabled: bool) -> None:
+    global _session_reuse_mode
+    _session_reuse_mode = SESSION_REUSE_ENABLED if enabled else SESSION_REUSE_DISABLED
+    if not enabled:
+        close_run_test_rig_session()
+
+
+def _ensure_active_run_test_rig_session() -> RunTestRigSession:
+    global _active_session
+    if _active_session is not None:
+        return _active_session
+
+    invoke_module = _load_invoke_module_from_path()
+    moonraker_module = _load_moonraker_module_from_path()
+
+    invoke_module.ensure_no_running_klippy()
+    invoke_module.remove_remote_klippy_log()
+    process = invoke_module.start_remote_klippy_session()
+
+    client = moonraker_module.MoonrakerClient(invoke_module.MOONRAKER_URL)
+    client.ensure_ready()
+
+    _active_session = RunTestRigSession(
+        invoke_module=invoke_module,
+        process=process,
+        client=client,
+        log_offset=0,
+    )
+    return _active_session
+
+
+def close_run_test_rig_session() -> None:
+    global _active_session
+    if _active_session is None:
+        return
+
+    session = _active_session
+    _active_session = None
+
+    try:
+        session.invoke_module.ensure_no_running_klippy()
+    finally:
+        session.invoke_module.terminate_process(session.process)
+
+
+def _slice_log_since_last_offset(full_log_text: str, session: RunTestRigSession) -> str:
+    if session.log_offset <= 0:
+        session.log_offset = len(full_log_text)
+        return full_log_text
+
+    if session.log_offset > len(full_log_text):
+        session.log_offset = len(full_log_text)
+        return full_log_text
+
+    sliced = full_log_text[session.log_offset :]
+    session.log_offset = len(full_log_text)
+    return sliced if sliced.strip() else full_log_text
+
+
+def _invoke_run_test_rig_scenario_reuse_session(gcode_lines: list[str], duration_seconds: int) -> ScenarioResult:
+    session = _ensure_active_run_test_rig_session()
+
+    session.invoke_module.run_gcode_via_moonraker(gcode_lines, duration_seconds, session.client)
+    full_log_text = session.client.get_klippy_log()
+    KLIPPY_LOG_PATH.write_text(full_log_text, encoding="utf-8")
+    scenario_log_text = _slice_log_since_last_offset(full_log_text, session)
+
+    return ScenarioResult(
+        duration_seconds=duration_seconds,
+        output="invoke_test_rig.reuse_session",
+        log_text=scenario_log_text,
+        log_path=KLIPPY_LOG_PATH,
+    )
+
+
 def invoke_run_test_rig_scenario(gcode_lines: list[str], expected_runtime_seconds: float, extra_seconds: float = 0.0) -> ScenarioResult:
     set_run_test_rig_startup_gcode(gcode_lines)
     duration_seconds = get_run_test_rig_duration_seconds(expected_runtime_seconds, extra_seconds=extra_seconds)
-    command = [sys.executable, str(INVOKE_SCRIPT_PATH), "-DurationSeconds", str(duration_seconds)]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    output = f"{result.stdout}\n{result.stderr}".strip()
 
-    if result.returncode != 0:
-        raise RuntimeError(f"Invoke failed. Output:\n{output}")
+    if _session_reuse_mode == SESSION_REUSE_ENABLED:
+        return _invoke_run_test_rig_scenario_reuse_session(gcode_lines, duration_seconds)
 
-    if not KLIPPY_LOG_PATH.exists():
+    invoke_module = _load_invoke_module_from_path()
+    run_scenario = getattr(invoke_module, "run_scenario", None)
+    if run_scenario is None:
+        raise RuntimeError("Invoke module is missing required function 'run_scenario'.")
+
+    log_path = run_scenario(gcode_lines=gcode_lines, duration_seconds=duration_seconds)
+
+    resolved_log_path = Path(log_path) if log_path else KLIPPY_LOG_PATH
+    output = "invoke_test_rig.run_scenario"
+    if not resolved_log_path.exists():
         raise RuntimeError(f"Missing klippy.log after invoke. Output:\n{output}")
 
     return ScenarioResult(
         duration_seconds=duration_seconds,
         output=output,
-        log_text=KLIPPY_LOG_PATH.read_text(encoding="utf-8"),
-        log_path=KLIPPY_LOG_PATH,
+        log_text=resolved_log_path.read_text(encoding="utf-8"),
+        log_path=resolved_log_path,
     )
+
+
+atexit.register(close_run_test_rig_session)
+
+
+def query_run_test_rig_filament_sensor(sensor_name: str) -> bool:
+    if _session_reuse_mode != SESSION_REUSE_ENABLED:
+        raise RuntimeError("query_run_test_rig_filament_sensor requires session reuse to be enabled")
+    session = _ensure_active_run_test_rig_session()
+    key = "filament_switch_sensor %s" % sensor_name
+    response = session.client.query_objects({key: None})
+    return bool(response["result"]["status"][key]["filament_detected"])
 
 
 def _is_benign_traceback(lines: list[str], traceback_index: int) -> bool:
@@ -160,6 +291,15 @@ def assert_run_test_rig_healthy(log_text: str) -> None:
     if fatal_lines:
         fatal_block = "\n".join(fatal_lines)
         raise AssertionError(f"Fatal run-test-rig lines found:\n{fatal_block}")
+
+
+def assert_no_timer_too_close(log_text: str) -> None:
+    matches = TIMER_TOO_CLOSE_PATTERN.findall(log_text)
+    if matches:
+        raise AssertionError(
+            "'Timer too close' error reported in klippy.log. "
+            "Scheduling conflict during command execution."
+        )
 
 
 def get_bldc_tach_entries(log_text: str, unit: str = TARGET_UNIT) -> list[BldcTachEntry]:
@@ -249,39 +389,6 @@ def get_bldc_runtime_seconds(log_text: str, unit: str = TARGET_UNIT) -> RuntimeW
     )
 
 
-def get_bldc_terminal_runtime_seconds(log_text: str, unit: str = TARGET_UNIT) -> RuntimeWindow:
-    timed_events = [
-        event
-        for event in get_bldc_pin_events(log_text, unit=unit)
-        if event.time is not None and _is_pwm_pin_event(event)
-    ]
-    start_event = next((event for event in timed_events if event.applied > 0.0), None)
-    if start_event is None:
-        raise RuntimeError(f"No non-zero BLDC_SET_PIN PWM event with time found for unit '{unit}'.")
-
-    zero_events_after_start = [
-        event
-        for event in timed_events
-        if event.time is not None and event.time > start_event.time and event.applied <= 0.0
-    ]
-    if not zero_events_after_start:
-        raise RuntimeError(f"No terminal zero BLDC_SET_PIN PWM event found for unit '{unit}'.")
-
-    stop_event = zero_events_after_start[-1]
-    return RuntimeWindow(
-        runtime_seconds=float(stop_event.time - start_event.time),
-        start_event=start_event,
-        stop_event=stop_event,
-    )
-
-
-def get_bldc_observed_rpm(log_text: str, unit: str = TARGET_UNIT) -> float:
-    entries = get_bldc_tach_entries(log_text, unit=unit)
-    if not entries:
-        raise RuntimeError(f"No BLDC_TACH lines found for unit '{unit}'.")
-    return max(entry.rpm for entry in entries)
-
-
 def get_bldc_evidence_preview(log_text: str, unit: str = TARGET_UNIT, count: int = 5) -> list[str]:
     preview: list[str] = []
     for match in BLDC_PREVIEW_PATTERN.finditer(log_text):
@@ -330,93 +437,16 @@ def assert_bldc_tach_control_pwm_raised_to_max(log_text: str, unit: str = TARGET
         )
 
 
-def assert_bldc_pulsed_control_pwm_raised_to_max(log_text: str, unit: str = TARGET_UNIT) -> None:
-    control_entries = get_bldc_control_entries(log_text, unit=unit)
-    saturated_control = [
-        entry for entry in control_entries
-        if entry.reason in ("pulsed_mode", "pulsed_active") and entry.applied_pwm >= 0.999
-    ]
-    if not saturated_control:
-        preview = [entry.line for entry in control_entries[:8]]
-        raise AssertionError(
-            f"No pulsed BLDC_CONTROL saturation found for unit '{unit}'. "
-            "Expected pulsed_mode or pulsed_active with applied_pwm=1.0000. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    pin_events = get_bldc_pin_events(log_text, unit=unit)
-    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
-    saturated_pin = [event for event in pwm_pin_events if event.applied >= 0.999]
-    if not saturated_pin:
-        pin_preview = [event.line for event in pwm_pin_events[:8]]
-        raise AssertionError(
-            f"No pulsed BLDC_SET_PIN saturation found for unit '{unit}'. "
-            "Expected applied=1.0000 on PWM pin during pulsed move. "
-            f"Preview:\n{chr(10).join(pin_preview)}"
-        )
-
-
-def assert_bldc_starts_pulsed_and_ends_active_at_max_pwm(log_text: str, unit: str = TARGET_UNIT) -> None:
-    control_entries = get_bldc_control_entries(log_text, unit=unit)
-    transition_entries = [
-        entry for entry in control_entries
-        if entry.reason in ("pulsed_mode", "pulsed_active", "active")
-    ]
-    if not transition_entries:
-        raise AssertionError(f"No BLDC_CONTROL transition entries found for unit '{unit}'.")
-
-    first_transition = transition_entries[0]
-    if first_transition.reason not in ("pulsed_mode", "pulsed_active"):
-        preview = [entry.line for entry in transition_entries[:8]]
-        raise AssertionError(
-            f"BLDC transition did not start in pulsed mode for unit '{unit}'. "
-            f"Observed first reason={first_transition.reason}. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    active_entries = [entry for entry in transition_entries if entry.reason == "active"]
-    if not active_entries:
-        preview = [entry.line for entry in transition_entries[:8]]
-        raise AssertionError(
-            f"BLDC transition never reached active mode for unit '{unit}'. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    first_active_index = next(
-        index for index, entry in enumerate(transition_entries)
-        if entry.reason == "active"
-    )
-    if any(entry.reason in ("pulsed_mode", "pulsed_active") for entry in transition_entries[first_active_index + 1:]):
-        preview = [entry.line for entry in transition_entries[max(0, first_active_index - 3):first_active_index + 8]]
-        raise AssertionError(
-            f"BLDC transition returned to pulsed mode after entering active mode for unit '{unit}'. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    last_transition = transition_entries[-1]
-    if last_transition.reason != "active" or last_transition.applied_pwm < 0.999:
-        preview = [entry.line for entry in transition_entries[-8:]]
-        raise AssertionError(
-            f"BLDC transition did not end in active mode at max PWM for unit '{unit}'. "
-            f"Observed final reason={last_transition.reason} applied_pwm={last_transition.applied_pwm:.4f}. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    pin_events = get_bldc_pin_events(log_text, unit=unit)
-    pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
-    if not any(event.applied >= 0.999 for event in pwm_pin_events):
-        pin_preview = [event.line for event in pwm_pin_events[-8:]]
-        raise AssertionError(
-            f"No max-PWM BLDC_SET_PIN event found for unit '{unit}' during transition. "
-            f"Preview:\n{chr(10).join(pin_preview)}"
-        )
-
-
 def assert_bldc_tach_control_pwm_raised(log_text: str, unit: str = TARGET_UNIT) -> None:
     pin_events = get_bldc_pin_events(log_text, unit=unit)
     pwm_pin_events = [event for event in pin_events if _is_pwm_pin_event(event)]
     if not pwm_pin_events:
         raise AssertionError(f"No BLDC_SET_PIN PWM events found for unit '{unit}'.")
+
+    # Use actual PWM pin writes as baseline and ignore kick/discard pseudo-events.
+    baseline_events = [event for event in pwm_pin_events if event.message.startswith("pin=")]
+    if baseline_events:
+        pwm_pin_events = baseline_events
 
     initial_pwm = pwm_pin_events[0].applied
     if initial_pwm >= 0.999:
@@ -434,94 +464,3 @@ def assert_bldc_tach_control_pwm_raised(log_text: str, unit: str = TARGET_UNIT) 
         )
 
 
-def assert_bldc_pulsed_mode_present(log_text: str, unit: str = TARGET_UNIT) -> None:
-    control_entries = get_bldc_control_entries(log_text, unit=unit)
-    pulsed_entries = [
-        entry for entry in control_entries
-        if entry.reason in ("pulsed_mode", "pulsed_active")
-    ]
-    if pulsed_entries:
-        return
-
-    preview = [entry.line for entry in control_entries[:8]]
-    raise AssertionError(
-        f"No pulsed BLDC_CONTROL evidence found for unit '{unit}'. "
-        f"Expected reason=pulsed_mode or reason=pulsed_active. "
-        f"Preview:\n{chr(10).join(preview)}"
-    )
-
-
-def assert_bldc_pulse_edges_and_clean_stop(log_text: str, unit: str = TARGET_UNIT) -> None:
-    pin_events = get_bldc_pin_events(log_text, unit=unit)
-    pwm_events = [event for event in pin_events if _is_pwm_pin_event(event)]
-    if len(pwm_events) < 3:
-        preview = [event.line for event in pwm_events]
-        raise AssertionError(
-            f"Too few BLDC_SET_PIN PWM events for pulse verification on unit '{unit}'. "
-            f"Observed={len(pwm_events)}. Preview:\n{chr(10).join(preview)}"
-        )
-
-    non_zero_values = [event.applied for event in pwm_events if event.applied > 0.0]
-    if len(non_zero_values) < 2:
-        preview = [event.line for event in pwm_events[:8]]
-        raise AssertionError(
-            f"Missing repeated non-zero PWM pulse edges for unit '{unit}'. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    zero_events = [event for event in pwm_events if event.applied <= 0.0]
-    if not zero_events:
-        preview = [event.line for event in pwm_events[-8:]]
-        raise AssertionError(
-            f"Missing terminal zero-PWM stop event for unit '{unit}'. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-    # Require OFF edge during pulsing (not only final stop), so OFF remains true zero.
-    first_non_zero_index = next((idx for idx, event in enumerate(pwm_events) if event.applied > 0.0), None)
-    last_event_index = len(pwm_events) - 1
-    has_intermediate_zero = any(
-        event.applied <= 0.0 and first_non_zero_index is not None and first_non_zero_index < idx < last_event_index
-        for idx, event in enumerate(pwm_events)
-    )
-    if not has_intermediate_zero:
-        preview = [event.line for event in pwm_events[:12]]
-        raise AssertionError(
-            f"No intermediate zero OFF edge found for unit '{unit}'. "
-            f"Expected pulsed OFF transitions before final stop. "
-            f"Preview:\n{chr(10).join(preview)}"
-        )
-
-
-def assert_bldc_runtime_matches_move(
-    log_text: str,
-    move_mm: float,
-    speed_mm_s: float,
-    tolerance_s: float,
-    unit: str = TARGET_UNIT,
-) -> None:
-    if speed_mm_s <= 0.0:
-        raise AssertionError("speed_mm_s must be > 0 for runtime check")
-
-    runtime = get_bldc_runtime_seconds(log_text, unit=unit)
-    expected_runtime_s = move_mm / speed_mm_s
-    evidence = [runtime.start_event.line, runtime.stop_event.line]
-    assert_value_within_tolerance(
-        label=f"BLDC runtime for MOVE={move_mm} SPEED={speed_mm_s}",
-        observed=runtime.runtime_seconds,
-        expected=expected_runtime_s,
-        tolerance=tolerance_s,
-        evidence_lines=evidence,
-    )
-
-
-def assert_value_within_tolerance(label: str, observed: float, expected: float, tolerance: float, evidence_lines: list[str] | None = None) -> None:
-    if abs(observed - expected) <= tolerance:
-        return
-
-    evidence_block = ""
-    if evidence_lines:
-        evidence_block = f"\nEvidence:\n{chr(10).join(evidence_lines)}"
-    raise AssertionError(
-        f"{label} mismatch. Expected {expected} +/- {tolerance} but observed {observed}.{evidence_block}"
-    )

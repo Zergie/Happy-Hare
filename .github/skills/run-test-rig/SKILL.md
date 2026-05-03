@@ -19,6 +19,7 @@ Run narrowest real-hardware test using `invoke_test_rig.py` (or compatibility wr
 ## Scripts
 - **Export code (primary)**: `.github/skills/run-test-rig/export_to_test_rig.py` — copies Happy-Hare extras and printer_data config to the rig. Run before first test of a session or after code changes.
 - **Run test (primary)**: `.github/skills/run-test-rig/invoke_test_rig.py` — reads GCode from `.github/skills/run-test-rig/startup.gcode`, injects it into rig `printer.cfg`, auto-prepends `SET_KINEMATIC_POSITION X=150 Y=150 Z=25 SET_HOMED=XYZ`, `MMU_TEST_CONFIG LOG_LEVEL=4`, and `MMU_SELECT GATE=0` before the startup GCode; starts klippy, waits `-DurationSeconds`, kills it, downloads `klippy.log` to `.github/skills/run-test-rig/klippy.log`.
+- **Download log only (primary)**: `.github/skills/run-test-rig/download_klippy_log.py` — downloads current klippy log from Moonraker and overwrites local `.github/skills/run-test-rig/klippy.log` without running a scenario.
 - **Compatibility wrappers**: `.github/skills/run-test-rig/Export-ToTestRig.ps1` and `.github/skills/run-test-rig/Invoke-TestRig.ps1` call Python scripts above.
 
 ## Procedure
@@ -96,6 +97,7 @@ Run narrowest real-hardware test using `invoke_test_rig.py` (or compatibility wr
 - Write test GCode to `.github/skills/run-test-rig/startup.gcode` (one GCode command per line)
 - Run scenario (primary): `python .github/skills/run-test-rig/invoke_test_rig.py -DurationSeconds <N>`
 - Run scenario (compat): `. .github/skills/run-test-rig/Invoke-TestRig.ps1 -DurationSeconds <N>`
+- Download log only (primary): `python .github/skills/run-test-rig/download_klippy_log.py`
 - Verify evidence: `Select-String -Path .github/skills/run-test-rig/klippy.log -SimpleMatch '<expected pattern>'`
 - Verify no fatal errors: `Select-String -Path .github/skills/run-test-rig/klippy.log -SimpleMatch 'Unknown command:','Traceback (most recent call last)'`
 - Log location: `.github/skills/run-test-rig/klippy.log` (downloaded automatically by `invoke_test_rig.py`)
