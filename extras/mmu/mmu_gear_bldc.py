@@ -474,7 +474,6 @@ class MmuGearBldc:
             self.mcu_pwm_pin.get_mcu().min_schedule_time(),
             self.mcu_dir_pin.get_mcu().min_schedule_time(),
         )
-        self.mmu.log_debug("BLDC: motion_sample_time derived from min_schedule_time: result=%.6f unit=%s" % (self.motion_sample_time, self.section_name))
 
         self.active_sync_monitor = None
         self.printer.register_event_handler('klippy:connect', self._handle_connect)
@@ -770,7 +769,7 @@ class MmuGearBldc:
 
     def _get_scheduled_print_time(self):
         mcu = self.mcu_pwm_pin.get_mcu()
-        return mcu.estimated_print_time(self.reactor.monotonic() + mcu.min_schedule_time())
+        return mcu.estimated_print_time(self.reactor.monotonic() + mcu.min_schedule_time() + 0.015)
 
     def _handle_connect(self):
         """Probe and resolve sync monitor on connect (extruder guaranteed registered)."""
@@ -951,14 +950,27 @@ class MmuGearBldc:
         direction = 1 if mapped_dist > 0. else -1
         target_speed = speed * direction
         start_time = self._floored_print_time()
+        move_duration = abs(mapped_dist) / speed
+        stop_time = self._floored_print_time(start_time + move_duration)
 
-        kick_descriptor = MotionKickToSpeed(direction, self.kick_start_time, target_speed, start_time)
+        # Queue fixed-duration move phases so standalone MMU_TEST_MOVE keeps BLDC active
+        # for full move duration and stops deterministically at the end of the window.
+        kick_time = min(self.kick_start_time, move_duration)
+        if kick_time > EPSILON:
+            self.motion_queue.append((
+                MotionPwmDirect(direction, self.pwm_max, kick_time, start_time),
+                'move',
+            ))
 
-        if start_time >= kick_descriptor.transition_print_time - EPSILON:
-            kick_descriptor.advance(start_time)
+        cruise_start_time = self._floored_print_time(start_time + kick_time)
+        if move_duration - kick_time > EPSILON:
+            self.motion_queue.append((
+                MotionDescriptor(target_speed, True, cruise_start_time, direction),
+                'move',
+            ))
 
+        self.motion_queue.append((MotionStop(stop_time), 'move'))
         self.motion_state = self.MOTION_STATE_MOVING
-        self.motion_queue.append((kick_descriptor, 'move'))
         self._ensure_motion_timer()
         self.reactor.update_timer(self.motion_timer, self.reactor.NOW)
 
@@ -984,6 +996,7 @@ class MmuGearBldc:
             'map_mode': self.map_mode, 'map_points': len(self.calibration_map_points), 'map_fallback_reason': self.map_fallback_reason,
             'effective_max_rpm': self.get_effective_max_rpm(),
             'calibrated_max_rpm': self._get_calibrated_max_rpm(),
+            'motion_sample_time': self.motion_sample_time,
         }
 
     def _handle_synced(self):

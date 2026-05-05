@@ -5924,7 +5924,7 @@ class Mmu:
                     if bldc_active_move and motor == "gear":
                         pause_time = abs(dist) / max(speed, 1e-6)
                         if wait:
-                            pause_time += bldc.MOTION_SAMPLE_TIME
+                            pause_time += bldc.motion_sample_time
                         self.reactor.pause(self.reactor.monotonic() + pause_time)
                         pos[1] += dist
                         self.mmu_toolhead.set_position(pos)
