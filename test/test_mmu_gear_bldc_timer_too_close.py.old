@@ -1,0 +1,164 @@
+import os
+
+import pytest
+
+from test.support.bldc_fakes import (
+    FakeConfig,
+    FakeExtruder,
+    FakeMmu,
+    FakePrinter,
+    FakeToolhead,
+    load_mmu_gear_bldc_module,
+)
+
+
+class StrictMcu:
+    def __init__(self):
+        self._min_schedule = 0.2
+
+    def min_schedule_time(self):
+        return self._min_schedule
+
+    def estimated_print_time(self, _eventtime):
+        return 5.0
+
+
+class StalledEstimateMcu:
+    def __init__(self, print_time=14.2, min_schedule=0.2):
+        self._print_time = print_time
+        self._min_schedule = min_schedule
+
+    def min_schedule_time(self):
+        return self._min_schedule
+
+    def estimated_print_time(self, _eventtime):
+        return self._print_time
+
+
+class StrictDirPin:
+    def __init__(self, mcu):
+        self._mcu = mcu
+        self._pin = "strict_dir"
+        self.digital_calls = []
+
+    def get_mcu(self):
+        return self._mcu
+
+    def set_digital(self, print_time, value):
+        floor = self._mcu.estimated_print_time(0.0) + self._mcu.min_schedule_time()
+        if print_time < floor - 1e-9:
+            raise RuntimeError(f"Timer too close: {floor - print_time:.2f} over")
+        self.digital_calls.append((print_time, value))
+
+
+class StrictPwmPin:
+    def __init__(self, mcu):
+        self._mcu = mcu
+        self._pin = "strict_pwm"
+        self.pwm_calls = []
+
+    def get_mcu(self):
+        return self._mcu
+
+    def set_pwm(self, print_time, value):
+        floor = self._mcu.estimated_print_time(0.0) + self._mcu.min_schedule_time()
+        if print_time < floor - 1e-9:
+            raise RuntimeError(f"Timer too close: {floor - print_time:.2f} over")
+        self.pwm_calls.append((print_time, value))
+
+
+@pytest.fixture()
+def bldc_module():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    return load_mmu_gear_bldc_module(repo_root)
+
+
+@pytest.fixture()
+def runtime_env():
+    extruder = FakeExtruder()
+    toolhead = FakeToolhead(extruder=extruder)
+    printer = FakePrinter(toolhead=toolhead)
+    mmu = FakeMmu(toolhead=toolhead, gate_selected=0)
+    return printer, mmu, extruder
+
+
+@pytest.fixture()
+def bldc(runtime_env, bldc_module):
+    printer, mmu, _ = runtime_env
+    config = FakeConfig(
+        printer,
+        {
+            "dir_pin": "D0",
+            "pwm_pin": "P0",
+            "pwm_min": 0.2,
+            "pwm_max": 1.0,
+            "rotation_distance": 2.0,
+            "direction_map": [0],
+            "kick_start_time": 0.05,
+            "brake_pwm": 0.8,
+            "brake_max_time": 0.2,
+        },
+    )
+    return bldc_module.MmuGearBldc(config, mmu)
+
+def test_mmu_gear_bldc_send_pin_dir_floored_entry_avoids_timer_too_close(bldc):
+    """Verify floored _send_pin direction writes do not trigger Timer too close."""
+    strict_dir = StrictDirPin(StrictMcu())
+    bldc.mcu_dir_pin = strict_dir
+    bldc.last_dir = None
+
+    bldc._send_pin(strict_dir, 1, 5.2)
+
+    assert strict_dir.digital_calls == [(5.2, 1)]
+
+
+def test_mmu_gear_bldc_send_pin_pwm_unfloored_entry_avoids_timer_too_close_via_pwm_floor(bldc):
+    """Verify unfloored _send_pin PWM writes are floored before the PWM callback runs."""
+    strict_pwm = StrictPwmPin(StrictMcu())
+    bldc.mcu_pwm_pin = strict_pwm
+    bldc._get_scheduled_print_time = lambda: 5.2
+    bldc.last_pwm = 0.
+
+    bldc._send_pin(strict_pwm, 0.5, 5.0)
+
+    expected_floor = 5.2 + bldc.min_schedule_time
+    assert strict_pwm.pwm_calls == [(pytest.approx(expected_floor, abs=0.001), 0.5)]
+
+
+def test_mmu_gear_bldc_send_pin_pwm_floored_entry_avoids_timer_too_close(bldc):
+    """Verify floored _send_pin PWM writes do not trigger Timer too close."""
+    strict_pwm = StrictPwmPin(StrictMcu())
+    bldc.mcu_pwm_pin = strict_pwm
+    bldc.kick_start_time = 0.
+    bldc.last_pwm = 0.
+
+    bldc._send_pin(strict_pwm, 0.5, 5.2)
+
+    assert strict_pwm.pwm_calls == [(5.2, 0.5)]
+
+
+def test_mmu_gear_bldc_send_pin_dir_very_stale_time_is_floored_safely(bldc):
+    """Verify stale direction writes are floored and do not trigger Timer too close."""
+    strict_dir = StrictDirPin(StrictMcu())
+    bldc.mcu_dir_pin = strict_dir
+    bldc.last_dir = None
+    bldc._get_scheduled_print_time = lambda: 5.2
+
+    bldc._send_pin(strict_dir, 1, 1.0)
+
+    expected_floor = 5.2 + bldc.min_schedule_time
+    assert strict_dir.digital_calls == [(pytest.approx(expected_floor, abs=0.001), 1)]
+
+
+def test_mmu_gear_bldc_send_pin_pwm_stalled_estimator_is_floored_safely(bldc):
+    """Keep stalled print-time estimates ahead of the MCU schedule floor."""
+    strict_pwm = StrictPwmPin(StalledEstimateMcu(print_time=14.2, min_schedule=0.2))
+    bldc.mcu_pwm_pin = strict_pwm
+    bldc._get_scheduled_print_time = lambda: 14.4
+    bldc.kick_start_time = 0.
+    bldc.last_pwm = 0.
+
+    bldc._send_pin(strict_pwm, 0.5, 14.2)
+
+    expected_floor = 14.4 + bldc.min_schedule_time
+    assert strict_pwm.pwm_calls == [(pytest.approx(expected_floor, abs=0.001), 0.5)]

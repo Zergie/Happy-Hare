@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -34,15 +35,14 @@ DIAGNOSTIC_LINE_IGNORES: dict[str, dict[str, list[str]]] = {
             "def add_extra_endstop(self, pin, name, register=True, bind_rail_steppers=True, mcu_endstop=None):",
         ],
         "extras/mmu/mmu_gear_bldc.py": [
-            "def _log_sync_sample(self, source, dt, de, raw_speed, selected_speed, speed_scale, moving):",
-            "def _log_speed(self, source, speed, requested_rpm, clamped_rpm, pwm, forward):",
-            "def _set_rpm(self, rpm, forward, source='move', linear_speed=0., print_time=None):",
+            "def __init__(self, print_time, speed_mm_s, pid_enable, direction=1, duration=0.):",
         ],
     },
-    "relative-beyond-top-level": {
+    "import-outside-toplevel": {
         "extras/mmu/mmu_gear_bldc.py": [
-            "*",  # Relative import is needed to import klipper modules without adding extras to sys.path, which would cause other import issues.
-        ],
+            "from .. import output_pin",
+            "from ..mmu_espooler import GCodeRequestQueue as FallbackGCodeRequestQueue",
+        ]
     },
     "protected-access": {
         "extras/mmu/mmu_gear_bldc.py": [
@@ -50,6 +50,11 @@ DIAGNOSTIC_LINE_IGNORES: dict[str, dict[str, list[str]]] = {
             "extruder._hh_bldc_process_move_owner = self",
         ],
     },
+    "no-value-for-parameter": {
+        "extras/mmu/mmu_gear_bldc.py": [
+            "self.mcu_pwm_pin = MCU_queued_pwm(pwm_pin_params)",
+        ],
+    }
 }
 
 _FILE_LINE_CACHE: dict[str, list[str]] = {}
@@ -128,11 +133,111 @@ def _raise_if_ignore_rules_not_used(scenario: Scenario) -> None:
 
 
 def _get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[5]
+    return Path(__file__).resolve().parents[1]
 
 
 def _get_pylintrc_path() -> Path:
     return _get_repo_root() / "extras" / ".pylintrc"
+
+
+def _get_workspace_root() -> Path:
+    return _get_repo_root().parents[2]
+
+
+def _get_lint_target_root() -> Path:
+    return _get_workspace_root() / "klipper" / "klippy"
+
+
+def _remove_path(path: Path) -> None:
+    is_junction = getattr(path, "is_junction", lambda: False)()
+    if path.is_symlink() or is_junction or path.is_file():
+        path.unlink()
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _link_directory(target: Path, source: Path) -> None:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(target), str(source)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            output = "\n".join(
+                line for line in [result.stdout.strip(), result.stderr.strip()] if line
+            )
+            raise AssertionError("Failed to create junction %s -> %s\n%s" % (target, source, output))
+        return
+    target.symlink_to(source, target_is_directory=True)
+
+
+def _read_link_target(path: Path) -> str | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+
+    if sys.platform == "win32":
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-Item -LiteralPath '%s' -Force).Target" % str(path).replace("'", "''"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        target = result.stdout.strip()
+        return target or None
+
+    return str(path.resolve(strict=False))
+
+
+def _matches_link_target(path: Path, source: Path) -> bool:
+    target = _read_link_target(path)
+    if target is None:
+        return False
+    return Path(target).resolve() == source.resolve()
+
+
+def _ensure_lint_target_link(scenario: Scenario) -> Path:
+    klippy_root = _get_lint_target_root()
+    if not klippy_root.exists():
+        raise AssertionError("Missing Klipper klippy dir: %s" % klippy_root)
+
+    target_extras = klippy_root / "extras"
+    if not target_extras.exists():
+        raise AssertionError("Missing extras dir: %s" % target_extras)
+
+    relative_path = Path(scenario.label)
+    source_path = scenario.file_path
+
+    if len(relative_path.parts) > 1 and relative_path.parts[1] == "mmu":
+        source_dir = source_path.parent
+        target_dir = target_extras / "mmu"
+        if not _matches_link_target(target_dir, source_dir):
+            if target_dir.exists() or target_dir.is_symlink():
+                _remove_path(target_dir)
+            _link_directory(target_dir, source_dir)
+        return klippy_root
+
+    target_file = target_extras / relative_path.name
+    if not _matches_link_target(target_file, source_path):
+        if target_file.exists() or target_file.is_symlink():
+            _remove_path(target_file)
+        target_file.symlink_to(source_path)
+    return klippy_root
+
+
+def _scenario_module_name(scenario: Scenario) -> str:
+    relative_path = Path(scenario.label)
+    module_path = relative_path.with_suffix("")
+    return ".".join(module_path.parts)
 
 
 def _run_git_command(args: list[str]) -> str:
@@ -339,23 +444,74 @@ def _build_failure_output(result: subprocess.CompletedProcess[str]) -> str:
     return "\n".join(line for line in [result.stdout.strip(), result.stderr.strip()] if line)
 
 
+def _parse_pylint_diagnostics_with_module(
+    stdout_text: str,
+) -> dict[str, list[tuple[int, str, str, str]]]:
+    """Parse Pylint JSON output and group diagnostics by module name."""
+    diagnostics_by_module: dict[str, list[tuple[int, str, str, str]]] = {}
+
+    try:
+        payload = json.loads(stdout_text)
+    except Exception:
+        return diagnostics_by_module
+
+    if not isinstance(payload, list):
+        return diagnostics_by_module
+
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        module = item.get("module", "")
+        line = item.get("line")
+        if not isinstance(line, int):
+            continue
+
+        if module not in diagnostics_by_module:
+            diagnostics_by_module[module] = []
+        diagnostics_by_module[module].append(
+            (
+                line,
+                str(item.get("symbol", "")),
+                str(item.get("message", "")),
+                str(item.get("type", "")),
+            )
+        )
+
+    return diagnostics_by_module
+
+
 PYLINTRC_PATH = _get_pylintrc_path()
 SCENARIOS = _build_scenarios()
 
-if not SCENARIOS:
-    pytestmark = pytest.mark.skip(reason="No changed extras Python files since remote/main")
+# Cache for single-run Pylint results, populated on first test execution
+_PYLINT_RESULTS_CACHE: dict[str, list[tuple[int, str, str, str]]] | None = None
 
 
-@pytest.mark.parametrize("scenario", SCENARIOS, ids=[scenario.label for scenario in SCENARIOS])
-def test_pylint_each_extras_file(scenario: Scenario) -> None:
-    _IGNORE_USAGE_STATE.pop(scenario.label, None)
-    for key in list(_IGNORE_MATCHED_LINES.keys()):
-        if key[0] == scenario.label:
-            del _IGNORE_MATCHED_LINES[key]
+def _ensure_pylint_results_cached() -> dict[str, list[tuple[int, str, str, str]]]:
+    """Run Pylint once for all scenarios and cache results by module name."""
+    global _PYLINT_RESULTS_CACHE
+
+    if _PYLINT_RESULTS_CACHE is not None:
+        return _PYLINT_RESULTS_CACHE
+
+    _PYLINT_RESULTS_CACHE = {}
+
+    if not SCENARIOS:
+        return _PYLINT_RESULTS_CACHE
 
     if not PYLINTRC_PATH.exists():
         raise AssertionError("Missing pylint rcfile: %s" % PYLINTRC_PATH)
 
+    # Set up all symlinks and collect module names
+    klippy_root = _get_lint_target_root()
+    lint_targets = []
+
+    for scenario in SCENARIOS:
+        _ensure_lint_target_link(scenario)
+        lint_target = _scenario_module_name(scenario)
+        lint_targets.append(lint_target)
+
+    # Run pylint once with all targets
     result = subprocess.run(
         [
             sys.executable,
@@ -365,33 +521,47 @@ def test_pylint_each_extras_file(scenario: Scenario) -> None:
             "--score=n",
             "--rcfile",
             str(PYLINTRC_PATH),
-            str(scenario.file_path),
+            *lint_targets,
         ],
+        cwd=str(klippy_root),
         capture_output=True,
         text=True,
         check=False,
     )
 
-    if result.returncode == 0:
-        return
-
     output = _build_failure_output(result)
     if "No module named pylint" in output:
-        raise AssertionError("pylint is required but not installed for %s\n%s" % (scenario.label, output))
+        raise AssertionError("pylint is required but not installed\n%s" % output)
 
-    diagnostics = _parse_pylint_diagnostics(result.stdout, output)
-    if not diagnostics:
-        raise AssertionError(
-            "pylint failed for %s and diagnostics could not be line-mapped\n%s"
-            % (scenario.label, output)
-        )
+    # Parse all diagnostics grouped by module
+    _PYLINT_RESULTS_CACHE = _parse_pylint_diagnostics_with_module(result.stdout)
+    if not _PYLINT_RESULTS_CACHE and result.returncode != 0:
+        raise AssertionError("pylint failed and diagnostics could not be parsed\n%s" % output)
 
-    raw_diagnostics = list(diagnostics)
+    return _PYLINT_RESULTS_CACHE
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS, ids=[scenario.label for scenario in SCENARIOS])
+@pytest.mark.timeout(60)
+def test_pylint_each_extras_file(scenario: Scenario) -> None:
+    """Validate each changed file against cached Pylint results."""
+    _IGNORE_USAGE_STATE.pop(scenario.label, None)
+    for key in list(_IGNORE_MATCHED_LINES.keys()):
+        if key[0] == scenario.label:
+            del _IGNORE_MATCHED_LINES[key]
+
+    # Ensure Pylint has run and cache is populated
+    diagnostics_by_module = _ensure_pylint_results_cached()
+
+    lint_target = _scenario_module_name(scenario)
+    raw_diagnostics = diagnostics_by_module.get(lint_target, [])
+
     diagnostics = [
-        diagnostic for diagnostic in diagnostics if not _is_ignored_diagnostic(scenario, diagnostic)
+        diagnostic for diagnostic in raw_diagnostics if not _is_ignored_diagnostic(scenario, diagnostic)
     ]
     _raise_if_stale_or_unused_ignore_lines(scenario, raw_diagnostics)
     _raise_if_ignore_rules_not_used(scenario)
+
     if not diagnostics:
         return
 

@@ -1,0 +1,747 @@
+import importlib.util
+import os
+import sys
+import types
+
+import pytest
+
+from test.support.bldc_fakes import (
+    FakeConfig,
+    FakeCounter,
+    FakePins,
+    FakePrinter,
+    FakeQueuedPwm,
+    StrictMcu,
+    install_output_pin_module,
+)
+
+
+from test.support.bldc_dummies import (
+    _Dummy,
+    _DebugStepperMovement,
+    _DummyCalibrationManager,
+    _DummyEnvironmentManager,
+    _DummyExtruderObj,
+    _DummyGCode,
+    _DummyGCodeMove,
+    _DummyHomingMove,
+    _DummyIdleTimeout,
+    _DummyLedManager,
+    _DummyMachine,
+    _DummyMcuObj,
+    _DummyMoveQueue,
+    _DummyMmuToolhead,
+    _DummyPauseResume,
+    _DummySaveVariables,
+    _DummySensorManager,
+    _DummyStepperRailBase,
+    _DummySyncFeedbackManager,
+    _DummyToolhead,
+    _FakeSelector,
+    _MiniMutex,
+    _MiniPrinter,
+    _dummy_mmu_test,
+)
+
+
+class _RealConfig(FakeConfig):
+    def __init__(self, printer, values=None, name="mmu", sections=None):
+        super().__init__(printer, values=values, name=name)
+        self._sections = sections or {}
+
+    def getint(self, key, default=0, minval=None, maxval=None):
+        has_value = key in self._values
+        value = int(self._values.get(key, default))
+        if has_value and minval is not None and value < minval:
+            raise RuntimeError("%s below min" % key)
+        if has_value and maxval is not None and value > maxval:
+            raise RuntimeError("%s above max" % key)
+        return value
+
+    def getchoice(self, key, choices, default=None):
+        value = self._values.get(key, default)
+        if value in choices:
+            return choices[value]
+        return value
+
+    def getfloat(self, key, default=0.0, minval=None, maxval=None, above=None, below=None):
+        has_value = key in self._values
+        value = self._values.get(key, default)
+        if value is None:
+            return None
+        value = float(value)
+        if has_value and minval is not None and value < minval:
+            raise RuntimeError("%s below min" % key)
+        if has_value and maxval is not None and value > maxval:
+            raise RuntimeError("%s above max" % key)
+        if has_value and above is not None and value <= above:
+            raise RuntimeError("%s must be above threshold" % key)
+        if has_value and below is not None and value >= below:
+            raise RuntimeError("%s must be below threshold" % key)
+        return value
+
+    def getlist(self, key, default=()):
+        return list(self._values.get(key, default))
+
+    def has_section(self, name):
+        return name in self._sections
+
+    def getsection(self, name):
+        if name in self._sections:
+            return _RealConfig(self._printer, self._sections[name], name=name, sections=self._sections)
+
+        class _Section:
+            def getsection(self, _name2):
+                return self
+
+            def getint(self, _k, default=0):
+                return default
+
+            def getfloat(self, _k, default=0.0):
+                return default
+
+            def get(self, _k, default=None):
+                return default
+
+            def getboolean(self, _k, default=False):
+                return default
+
+        return _Section()
+
+    def get_prefix_options(self, prefix):
+        return [key for key in self._values if key.startswith(prefix)]
+
+
+class _RealPrinter(FakePrinter):
+    def __init__(self):
+        super().__init__(toolhead=_DummyToolhead(), pins=FakePins())
+        self._reactor.mutex = self._mutex
+        self.start_args = {"log_file": os.path.join(os.getcwd(), "klippy.log")}
+        self._gcode_move = _DummyGCodeMove()
+        self._gcode = _DummyGCode(self._gcode_move)
+        self._machine = _DummyMachine()
+        self._mcu = _DummyMcuObj("mcu")
+        self._pause_resume = _DummyPauseResume()
+        self._idle_timeout = _DummyIdleTimeout()
+        self._save_variables = _DummySaveVariables()
+        self._extruder = _DummyExtruderObj()
+
+    @staticmethod
+    def _mutex():
+        return _MiniMutex()
+
+    def load_object(self, _config, name):
+        if name == "gcode_move":
+            return self._gcode_move
+        if name == "motion_queuing":
+            return self._motion_queuing
+        return None
+
+    def lookup_object(self, name, default=None):
+        table = {
+            "gcode": self._gcode,
+            "mmu_machine": self._machine,
+            "toolhead": self._toolhead,
+            "pause_resume": self._pause_resume,
+            "idle_timeout": self._idle_timeout,
+            "save_variables": self._save_variables,
+            "extruder": self._extruder,
+            "pins": self._pins,
+        }
+        return table.get(name, default)
+
+    def lookup_objects(self, module=None):
+        if module == "mcu":
+            return [("mcu", self._mcu)]
+        return []
+
+    def add_object(self, _name, _obj):
+        return None
+
+
+def _install_mmu_dependencies(repo_root):
+    extras_dir = os.path.join(repo_root, "extras")
+    mmu_dir = os.path.join(extras_dir, "mmu")
+    klippy_candidates = [
+        os.path.abspath(os.path.join(repo_root, "..", "..", "..", "klipper", "klippy")),
+        os.path.abspath(os.path.join(repo_root, "..", "..", "klipper", "klippy")),
+        os.path.abspath(os.path.join(repo_root, "..", "klipper", "klippy")),
+    ]
+    klippy_dir = next((path for path in klippy_candidates if os.path.exists(path)), None)
+    if klippy_dir and klippy_dir not in sys.path:
+        sys.path.insert(0, klippy_dir)
+
+    for key in ["extras", "extras.mmu", "extras.mmu.mmu"]:
+        sys.modules.pop(key, None)
+
+    extras_pkg = types.ModuleType("extras")
+    extras_pkg.__path__ = [extras_dir]
+    sys.modules["extras"] = extras_pkg
+
+    mmu_pkg = types.ModuleType("extras.mmu")
+    mmu_pkg.__path__ = [mmu_dir]
+    sys.modules["extras.mmu"] = mmu_pkg
+
+    chelper_module = types.ModuleType("chelper")
+    chelper_module.get_ffi = lambda: (None, types.SimpleNamespace())
+    sys.modules["chelper"] = chelper_module
+
+    if "serial" not in sys.modules:
+        serial_module = types.ModuleType("serial")
+        serial_module.Serial = _Dummy
+        serial_module.SerialException = Exception
+        sys.modules["serial"] = serial_module
+
+    if "termios" not in sys.modules:
+        termios_module = types.ModuleType("termios")
+        termios_module.TCSANOW = 0
+        termios_module.TCSADRAIN = 1
+        termios_module.TCSAFLUSH = 2
+        termios_module.TCIFLUSH = 0
+        termios_module.TCOFLUSH = 1
+        termios_module.TCIOFLUSH = 2
+        termios_module.tcgetattr = lambda *_args, **_kwargs: [0, 0, 0, 0, 0, 0]
+        termios_module.tcsetattr = lambda *_args, **_kwargs: None
+        termios_module.tcflush = lambda *_args, **_kwargs: None
+        sys.modules["termios"] = termios_module
+
+    if "fcntl" not in sys.modules:
+        fcntl_module = types.ModuleType("fcntl")
+        fcntl_module.ioctl = lambda *_args, **_kwargs: 0
+        sys.modules["fcntl"] = fcntl_module
+
+    if "stepper" not in sys.modules:
+        stepper_module = types.ModuleType("stepper")
+        stepper_module.GenericPrinterRail = _DummyStepperRailBase
+        stepper_module.PrinterRail = _DummyStepperRailBase
+        sys.modules["stepper"] = stepper_module
+
+    if "toolhead" not in sys.modules:
+        toolhead_module = types.ModuleType("toolhead")
+        toolhead_module.ToolHead = _Dummy
+        toolhead_module.MoveQueue = _DummyMoveQueue
+        toolhead_module.SDS_CHECK_TIME = 0.001
+        sys.modules["toolhead"] = toolhead_module
+
+    if "kinematics" not in sys.modules:
+        kinematics_module = types.ModuleType("kinematics")
+        kinematics_module.__path__ = []
+        sys.modules["kinematics"] = kinematics_module
+
+    if "kinematics.extruder" not in sys.modules:
+        extruder_module = types.ModuleType("kinematics.extruder")
+        extruder_module.PrinterExtruder = _Dummy
+        extruder_module.DummyExtruder = _Dummy
+        extruder_module.ExtruderStepper = _Dummy
+        sys.modules["kinematics.extruder"] = extruder_module
+
+    if "extras.led" not in sys.modules:
+        led_module = types.ModuleType("extras.led")
+        led_module.LEDHelper = _Dummy
+        sys.modules["extras.led"] = led_module
+
+    if "extras.pulse_counter" not in sys.modules:
+        pulse_counter_module = types.ModuleType("extras.pulse_counter")
+        pulse_counter_module.MCU_counter = FakeCounter
+        sys.modules["extras.pulse_counter"] = pulse_counter_module
+
+    if "extras.pwm_tool" not in sys.modules:
+        pwm_tool_module = types.ModuleType("extras.pwm_tool")
+        pwm_tool_module.MCU_queued_pwm = FakeQueuedPwm
+        sys.modules["extras.pwm_tool"] = pwm_tool_module
+
+    if "extras.output_pin" not in sys.modules:
+        install_output_pin_module(repo_root)
+
+    homing_module = types.ModuleType("extras.homing")
+    homing_module.Homing = _Dummy
+    homing_module.HomingMove = _DummyHomingMove
+    sys.modules["extras.homing"] = homing_module
+
+    tmc_module = types.ModuleType("extras.tmc")
+    tmc_module.TMCCommandHelper = _Dummy
+    sys.modules["extras.tmc"] = tmc_module
+
+    return None
+
+
+def _load_mmu_module(repo_root):
+    module_path = os.path.join(repo_root, "extras", "mmu", "mmu.py")
+    _install_mmu_dependencies(repo_root)
+
+    spec = importlib.util.spec_from_file_location("extras.mmu.mmu", module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["extras.mmu.mmu"] = module
+    spec.loader.exec_module(module)
+
+    # Test harness guard: import order may leave mmu.py bound to lightweight
+    # stubs that do not expose expected constants/context helpers.
+    # Ensure required symbols exist in module globals.
+    mmu_shared = sys.modules.get("extras.mmu.mmu_shared")
+    ui_degree = getattr(mmu_shared, "UI_DEGREE", "^")
+    ui_space = getattr(mmu_shared, "UI_SPACE", " ")
+    ui_separator = getattr(mmu_shared, "UI_SEPARATOR", ".")
+    ui_dash = getattr(mmu_shared, "UI_DASH", "-")
+    ui_block = getattr(mmu_shared, "UI_BLOCK", "*")
+    ui_cascade = getattr(mmu_shared, "UI_CASCADE", "-")
+
+    module.MmuToolHead = _DummyMmuToolhead
+    module.DebugStepperMovement = _DebugStepperMovement
+
+    if not hasattr(module, "UI_SPACE"):
+        module.UI_SPACE = ui_space
+    if not hasattr(module, "UI_SEPARATOR"):
+        module.UI_SEPARATOR = ui_separator
+    if not hasattr(module, "UI_DASH"):
+        module.UI_DASH = ui_dash
+    if not hasattr(module, "UI_DEGREE"):
+        module.UI_DEGREE = ui_degree
+    if not hasattr(module, "UI_BLOCK"):
+        module.UI_BLOCK = ui_block
+    if not hasattr(module, "UI_CASCADE"):
+        module.UI_CASCADE = ui_cascade
+
+    mmu_test = sys.modules.get("extras.mmu.mmu_test")
+    if mmu_test is not None and not hasattr(mmu_test, "UI_DEGREE"):
+        mmu_test.UI_DEGREE = ui_degree
+
+    return module
+
+
+def _load_klippy_gcode_module(repo_root):
+    candidates = [
+        os.path.join(repo_root, "..", "..", "..", "klipper", "klippy", "gcode.py"),
+        os.path.join(repo_root, "..", "..", "klipper", "klippy", "gcode.py"),
+        os.path.join(repo_root, "..", "klipper", "klippy", "gcode.py"),
+    ]
+    module_path = next((path for path in candidates if os.path.exists(path)), None)
+    if module_path is None:
+        raise FileNotFoundError("Unable to locate klipper/klippy/gcode.py from %s" % repo_root)
+    spec = importlib.util.spec_from_file_location("klippy.gcode", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _make_gcmd(gcode_dispatch, commandline):
+    command = commandline.strip().split()[0].upper()
+    gcmd = gcode_dispatch.create_gcode_command(command, commandline, {})
+    return gcode_dispatch._get_extended_params(gcmd)
+
+
+def _dispatch_printer_event(printer, event_name):
+    eventtime = printer.get_reactor().monotonic()
+    for name, callback in list(getattr(printer, "handlers", [])):
+        if name != event_name:
+            continue
+        if event_name.startswith("idle_timeout:"):
+            callback(eventtime)
+        else:
+            callback()
+
+
+def _fake_setup_mmu_hardware(self, _config):
+    self.homing_extruder = self.mmu_machine.homing_extruder
+    self.selector = _FakeSelector()
+    self.selector.is_homed = True
+    self.mmu_toolhead = _DummyMmuToolhead(self.printer.get_reactor())
+    self.gear_rail = self.mmu_toolhead.get_kinematics().rails[1]
+    self.mmu_extruder_stepper = types.SimpleNamespace(stepper=_DummyStepperRailBase._StepperObj())
+    self.sensor_manager = _DummySensorManager(self)
+    self.led_manager = _DummyLedManager(self)
+    self.encoder_name = "mmu_encoder"
+    self.encoder_sensor = None
+    self.espooler = None
+    if self.use_bldc_gear:
+        self._setup_bldc_gear(_config)
+
+
+def _configure_stepper_smoke_behaviors(mmu):
+    def _noop(self, *args, **kwargs):
+        _ = args, kwargs
+        return None
+
+    def _nullctx(self, *args, **kwargs):
+        _ = args, kwargs
+        return _MiniMutex()
+
+    def _select_gate(self, gate):
+        self.gate_selected = gate
+
+    def _select_tool(self, tool):
+        self.tool_selected = tool
+
+    def _set_tool_selected(self, tool):
+        self.tool_selected = tool
+
+    def _load_gate(self, allow_retry=True):
+        _ = allow_retry
+        return 0.0
+
+    def _unload_gate(self, homing_max=None):
+        _ = homing_max
+        return 0.0, 0.0
+
+    def _set_gate_status(self, gate, status):
+        self.gate_status[gate] = status
+
+    def _set_filament_pos_state(self, state, silent=False):
+        _ = silent
+        self.filament_pos = state
+
+    def _false(self, *args, **kwargs):
+        _ = args, kwargs
+        return False
+
+    def _mmu_visual(self):
+        return "MMU"
+
+    mmu._fix_started_state = types.MethodType(_noop, mmu)
+    mmu._wrap_suspend_filament_monitoring = types.MethodType(_nullctx, mmu)
+    mmu._wrap_suspendwrite_variables = types.MethodType(_nullctx, mmu)
+    mmu.wrap_action = types.MethodType(_nullctx, mmu)
+    mmu.wrap_suppress_visual_log = types.MethodType(_nullctx, mmu)
+    mmu._note_toolchange = types.MethodType(_noop, mmu)
+    mmu._save_toolhead_position_and_park = types.MethodType(_noop, mmu)
+    mmu._select_and_load_tool = types.MethodType(_noop, mmu)
+    mmu.load_sequence = types.MethodType(_noop, mmu)
+    mmu._persist_gate_statistics = types.MethodType(_noop, mmu)
+    mmu._persist_swap_statistics = types.MethodType(_noop, mmu)
+    mmu._continue_after = types.MethodType(_noop, mmu)
+    mmu.select_gate = types.MethodType(_select_gate, mmu)
+    mmu.select_tool = types.MethodType(_select_tool, mmu)
+    mmu.select_bypass = types.MethodType(_noop, mmu)
+    mmu._set_tool_selected = types.MethodType(_set_tool_selected, mmu)
+    mmu._load_gate = types.MethodType(_load_gate, mmu)
+    mmu._unload_gate = types.MethodType(_unload_gate, mmu)
+    mmu._set_gate_status = types.MethodType(_set_gate_status, mmu)
+    mmu._set_filament_pos_state = types.MethodType(_set_filament_pos_state, mmu)
+    mmu._initialize_encoder = types.MethodType(_noop, mmu)
+    mmu.is_in_print = types.MethodType(_false, mmu)
+    mmu.is_printing = types.MethodType(_false, mmu)
+    mmu._mmu_visual_to_string = types.MethodType(_mmu_visual, mmu)
+
+
+def _configure_bldc_behaviors(repo_root, mmu_module, mmu, command_name):
+    def _noop(self, *args, **kwargs):
+        _ = args, kwargs
+        return None
+
+    def _nullctx(self, *args, **kwargs):
+        _ = args, kwargs
+        return _MiniMutex()
+
+    if command_name in ["MMU_LOAD", "MMU_CHECK_GATE"]:
+        mmu._fix_started_state = types.MethodType(_noop, mmu)
+        mmu._wrap_suspend_filament_monitoring = types.MethodType(_nullctx, mmu)
+        mmu._wrap_suspendwrite_variables = types.MethodType(_nullctx, mmu)
+        mmu.wrap_action = types.MethodType(_nullctx, mmu)
+        mmu.wrap_suppress_visual_log = types.MethodType(_nullctx, mmu)
+
+
+def _build_real_mmu(repo_root, mmu_module, drive_mode, command_name):
+    printer = _RealPrinter()
+    printer._machine.use_bldc_gear = drive_mode == "bldc"
+    printer._machine.use_stepper_gear = drive_mode == "stepper"
+
+    min_schedule = 0.0
+    if drive_mode == "bldc" and command_name == "MMU_CHECK_GATE":
+        min_schedule = 0.1
+
+    printer._pins._mcu = StrictMcu(
+        min_schedule=min_schedule,
+        base_print_time=5.0,
+        reactor=printer.get_reactor(),
+    )
+
+    mmu_module.Mmu._setup_mmu_hardware = _fake_setup_mmu_hardware
+    mmu_module.MmuSyncFeedbackManager = _DummySyncFeedbackManager
+    mmu_module.MmuEnvironmentManager = _DummyEnvironmentManager
+    mmu_module.MmuTest = _dummy_mmu_test
+
+    section_values = {}
+    if drive_mode == "bldc":
+        section_values["mmu_gear_bldc"] = {
+            "dir_pin": "D0",
+            "pwm_pin": "P0",
+            "pwm_min": 0.2,
+            "pwm_max": 1.0,
+            "rotation_distance": 2.0,
+            "direction_map": [0, 0],
+            "hardware_pwm": True,
+            "cycle_time": 0.00005,
+            "kick_start_time": 0.05,
+            "brake_pwm": 1.0,
+            "brake_max_time": 0.25,
+        }
+
+    config = _RealConfig(
+        printer,
+        {
+            "happy_hare_version": mmu_module.Mmu.VERSION,
+            "log_level": 0,
+            "log_file_level": -1,
+            "log_visual": 0,
+            "log_statistics": 0,
+            "log_m117_messages": 0,
+            "default_idle_timeout": 120,
+            "gate_homing_endstop": mmu_module.Mmu.SENSOR_GATE,
+        },
+        name="mmu",
+        sections=section_values,
+    )
+    mmu = mmu_module.Mmu(config)
+
+    def _noop(self, *args, **kwargs):
+        _ = args, kwargs
+        return None
+
+    # Ready handler restores persisted state through deep selector/sensor APIs
+    # that are intentionally not modeled in this lightweight harness.
+    mmu._load_persisted_state = types.MethodType(_noop, mmu)
+    mmu._schedule_mmu_bootup_tasks = types.MethodType(_noop, mmu)
+
+    _dispatch_printer_event(printer, "klippy:connect")
+    _dispatch_printer_event(printer, "klippy:ready")
+
+    # Keep constructor as source-of-truth and only wire objects that are
+    # normally attached later in the full klippy lifecycle.
+    mmu.print_stats = None
+
+    # Minimal deterministic command harness state.
+    mmu.gate_selected = 0
+    mmu.tool_selected = 0
+    mmu.gate_status = [mmu_module.Mmu.GATE_AVAILABLE, mmu_module.Mmu.GATE_AVAILABLE]
+    mmu.filament_pos = mmu_module.Mmu.FILAMENT_POS_UNLOADED
+    mmu.calibration_status = mmu_module.Mmu.CALIBRATED_ESSENTIAL
+    mmu.has_filament_buffer = False
+
+    mmu.calibration_manager = _DummyCalibrationManager(mmu)
+    mmu.save_variables = printer.lookup_object("save_variables")
+
+    def _false(self, *args, **kwargs):
+        _ = args, kwargs
+        return False
+
+    def _zero(self, *args, **kwargs):
+        _ = args, kwargs
+        return 0.0
+
+    def _nullctx(self, *args, **kwargs):
+        _ = args, kwargs
+        return _MiniMutex()
+
+    mmu._can_use_encoder = types.MethodType(_false, mmu)
+    mmu.wrap_sync_gear_to_extruder = types.MethodType(_nullctx, mmu)
+    mmu.get_encoder_distance = types.MethodType(_zero, mmu)
+    mmu._reconcile_active_gear_stepper = types.MethodType(_noop, mmu)
+    mmu._adjust_gear_current = types.MethodType(_noop, mmu)
+    mmu._restore_gear_current = types.MethodType(_noop, mmu)
+    mmu.log_to_file = types.MethodType(_noop, mmu)
+    mmu.log_always = types.MethodType(_noop, mmu)
+    mmu.log_debug = types.MethodType(_noop, mmu)
+    mmu.log_trace = types.MethodType(_noop, mmu)
+
+    if drive_mode == "stepper":
+        mmu.has_bldc_gear = types.MethodType(_false, mmu)
+        mmu.get_bldc_for_gate = types.MethodType(_noop, mmu)
+        mmu._route_bldc_sync_to_selected_gate = types.MethodType(_noop, mmu)
+        mmu._wrap_espooler = types.MethodType(_nullctx, mmu)
+        mmu.movequeues_wait = types.MethodType(_noop, mmu)
+
+    if drive_mode == "stepper":
+        _configure_stepper_smoke_behaviors(mmu)
+    else:
+        _configure_bldc_behaviors(repo_root, mmu_module, mmu, command_name)
+
+    return mmu
+
+
+@pytest.fixture(scope="module")
+def mmu_runtime():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu_module = _load_mmu_module(repo_root)
+    gcode_module = _load_klippy_gcode_module(repo_root)
+    gcode_dispatch = gcode_module.GCodeDispatch(_MiniPrinter())
+    return mmu_module, gcode_dispatch
+
+
+@pytest.mark.parametrize(
+    "drive_mode,motor",
+    [
+        ("stepper", "gear"),
+        ("stepper", "extruder"),
+        ("stepper", "gear+extruder"),
+        ("stepper", "synced"),
+        ("bldc", "gear"),
+        ("bldc", "extruder"),
+        ("bldc", "gear+extruder"),
+        ("bldc", "synced"),
+    ],
+    ids=[
+        "stepper - MMU_TEST_MOVE gear",
+        "stepper - MMU_TEST_MOVE extruder",
+        "stepper - MMU_TEST_MOVE gear+extruder",
+        "stepper - MMU_TEST_MOVE synced",
+        "bldc - MMU_TEST_MOVE gear",
+        "bldc - MMU_TEST_MOVE extruder",
+        "bldc - MMU_TEST_MOVE gear+extruder",
+        "bldc - MMU_TEST_MOVE synced",
+    ],
+)
+def test_mmu_test_move(mmu_runtime, drive_mode, motor):
+    """Run MMU_TEST_MOVE with stepper and BLDC-backed harness variants."""
+    mmu_module, gcode_dispatch = mmu_runtime
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu = _build_real_mmu(repo_root, mmu_module, drive_mode, "MMU_TEST_MOVE")
+    commandline = "MMU_TEST_MOVE MOTOR=%s MOVE=100 SPEED=400" % motor
+    gcmd = _make_gcmd(gcode_dispatch, commandline)
+    mmu.cmd_MMU_TEST_MOVE(gcmd)
+
+
+@pytest.mark.parametrize(
+    "drive_mode,commandline",
+    [
+        ("stepper", "MMU_LOAD"),
+        ("stepper", "MMU_LOAD EXTRUDER_ONLY=1"),
+        ("bldc", "MMU_LOAD"),
+        ("bldc", "MMU_LOAD EXTRUDER_ONLY=1"),
+    ],
+    ids=[
+        "stepper - MMU_LOAD",
+        "stepper - MMU_LOAD EXTRUDER_ONLY=1",
+        "bldc - MMU_LOAD",
+        "bldc - MMU_LOAD EXTRUDER_ONLY=1",
+    ],
+)
+def test_mmu_load(mmu_runtime, commandline, drive_mode):
+    """Run MMU_LOAD with stepper and BLDC-backed harness variants."""
+    mmu_module, gcode_dispatch = mmu_runtime
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu = _build_real_mmu(repo_root, mmu_module, drive_mode, "MMU_LOAD")
+
+    # Exercise a deterministic non-zero BLDC extruder load distance and then
+    # validate drive activity from PWM pin state.
+    if drive_mode == "bldc" and commandline == "MMU_LOAD":
+        bldc = mmu.get_bldc_for_gate(mmu.gate_selected)
+        pwm_pin = bldc.mcu_pwm_pin
+        pwm_pin.pwm_calls = []
+        pwm_pin.pwm_events = []
+        mmu.mmu_toolhead.motion_events = []
+        mmu.gcode_load_sequence = 0
+        mmu.sensor_manager.loaded_gates.add(mmu.gate_selected)
+
+        mmu.toolhead_extruder_to_nozzle = 20.0
+        mmu.filament_remaining = 0.0
+        mmu.toolhead_residual_filament = 0.0
+        mmu.toolhead_ooze_reduction = 0.0
+        mmu.toolchange_retract = 0.0
+
+    gcmd = _make_gcmd(gcode_dispatch, commandline)
+    mmu.cmd_MMU_LOAD(gcmd)
+
+    common_context = (
+        "drive_mode=%s commandline=%s filament_pos=%s action=%s tool=%s gate=%s"
+        % (
+            drive_mode,
+            commandline,
+            mmu.filament_pos,
+            mmu.action,
+            mmu.tool_selected,
+            mmu.gate_selected,
+        )
+    )
+
+    # Shared command-level assertions for both stepper and BLDC harness paths.
+    assert mmu.action == 0, "MMU_LOAD did not restore idle action; %s" % common_context
+    assert mmu.tool_selected == 0, "MMU_LOAD changed selected tool unexpectedly; %s" % common_context
+    assert mmu.gate_selected == 0, "MMU_LOAD changed selected gate unexpectedly; %s" % common_context
+    assert mmu.filament_pos != mmu_module.Mmu.FILAMENT_POS_UNKNOWN, (
+        "MMU_LOAD ended with unknown filament position; %s" % common_context
+    )
+
+    if drive_mode == "bldc" and commandline == "MMU_LOAD":
+        pwm_values = [value for _, value in pwm_pin.pwm_calls]
+        pwm_events = list(pwm_pin.pwm_events)
+        forward_gear_motion_events = [
+            event
+            for event in mmu.mmu_toolhead.motion_events
+            if event.get("operation") == "move" and event["delta_y"] > 0.0
+        ]
+
+        assert mmu.filament_pos == mmu_module.Mmu.FILAMENT_POS_LOADED, (
+            "MMU_LOAD expected FILAMENT_POS_LOADED but got %s; "
+            "motion_events=%s pwm_events=%s"
+            % (
+                mmu.filament_pos,
+                mmu.mmu_toolhead.motion_events,
+                pwm_events,
+            )
+        )
+        assert forward_gear_motion_events, (
+            "MMU_LOAD produced no forward MMU gear move events; "
+            "all_motion_events=%s"
+            % (mmu.mmu_toolhead.motion_events,)
+        )
+        assert pwm_events, "MMU_LOAD produced no BLDC PWM events"
+
+        # Every forward MMU gear move segment must overlap with active BLDC
+        # pwm output, otherwise synced loading silently degraded.
+        previous_motion_time = forward_gear_motion_events[0]["eventtime"]
+        for index, event in enumerate(forward_gear_motion_events):
+            segment_pwm_events = [
+                pwm_event
+                for pwm_event in pwm_events
+                if previous_motion_time <= pwm_event["eventtime"] <= event["eventtime"]
+            ]
+            assert segment_pwm_events, (
+                "No BLDC PWM events during forward segment #%d "
+                "(t=[%.6f, %.6f]); all_pwm_events=%s"
+                % (
+                    index,
+                    previous_motion_time,
+                    event["eventtime"],
+                    pwm_events,
+                )
+            )
+            assert segment_pwm_events[0]["value"] > 0.0, (
+                "BLDC PWM not active at start of forward segment #%d; "
+                "segment_pwm_events=%s"
+                % (index, segment_pwm_events)
+            )
+            assert any(pwm_event["value"] > 0.0 for pwm_event in segment_pwm_events), (
+                "BLDC PWM never became active during forward segment #%d; "
+                "segment_pwm_events=%s"
+                % (index, segment_pwm_events)
+            )
+            previous_motion_time = event["eventtime"]
+        assert any(value > 0 for value in pwm_values), (
+            "BLDC PWM never drove a non-zero value; pwm_values=%s" % (pwm_values,)
+        )
+        assert any(value == 0 for value in pwm_values), (
+            "BLDC PWM never returned to zero after MMU_LOAD; pwm_values=%s"
+            % (pwm_values,)
+        )
+
+
+@pytest.mark.parametrize(
+    "drive_mode",
+    ["stepper", "bldc"],
+    ids=["stepper - MMU_CHECK_GATE", "bldc - MMU_CHECK_GATE"],
+)
+def test_mmu_check_gate(mmu_runtime, drive_mode):
+    """Run MMU_CHECK_GATE with stepper and BLDC-backed harness variants."""
+    mmu_module, gcode_dispatch = mmu_runtime
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu = _build_real_mmu(repo_root, mmu_module, drive_mode, "MMU_CHECK_GATE")
+
+    if drive_mode == "bldc":
+        mmu.gate_selected = 0
+        mmu.selector.selected_gate = 0
+        mmu.gate_status[0] = mmu_module.Mmu.GATE_AVAILABLE
+        mmu.filament_pos = mmu_module.Mmu.FILAMENT_POS_HOMED_GATE
+        mmu.sensor_manager.loaded_gates.add(0)
+
+    commandline = "MMU_CHECK_GATE"
+    gcmd = _make_gcmd(gcode_dispatch, commandline)
+    mmu.cmd_MMU_CHECK_GATE(gcmd)

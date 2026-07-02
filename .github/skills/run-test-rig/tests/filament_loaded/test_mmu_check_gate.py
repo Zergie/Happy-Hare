@@ -41,17 +41,26 @@ def reuse_klippy_session_for_module() -> Iterator[None]:
 
 
 def test_mmu_check_gate_with_filament_loaded() -> None:
-    assert query_run_test_rig_filament_sensor("extruder_sensor"), \
-        "extruder_sensor not triggered — is filament loaded?"
-    assert query_run_test_rig_filament_sensor("toolhead_sensor"), \
-        "toolhead_sensor not triggered — is filament loaded?"
+    extruder_loaded_before = query_run_test_rig_filament_sensor("extruder_sensor")
+    toolhead_loaded_before = query_run_test_rig_filament_sensor("toolhead_sensor")
+    if not (extruder_loaded_before and toolhead_loaded_before):
+        pytest.skip(
+            "Filament-loaded precondition not met for MMU_CHECK_GATE test: "
+            "extruder_sensor=%s, toolhead_sensor=%s" % (extruder_loaded_before, toolhead_loaded_before)
+        )
 
     result = invoke_run_test_rig_scenario(
-        gcode_lines=["MMU_CHECK_GATE"],
+        gcode_lines=["MMU_CHECK_GATE GATE=0"],
         expected_runtime_seconds=5.0,
     )
 
     assert_run_test_rig_healthy(result.log_text)
+    assert "Checking gate 0" in result.log_text, "MMU_CHECK_GATE gate check did not run for gate 0"
 
-    assert not query_run_test_rig_filament_sensor("unit_0_mmu_gate_sensor"), \
-        "unit_0_mmu_gate_sensor triggered after MMU_CHECK_GATE — unexpected filament detected at gate"
+    # MMU_CHECK_GATE should restore loaded state when filament was loaded before command.
+    assert query_run_test_rig_filament_sensor("extruder_sensor"), (
+        "extruder_sensor not triggered after MMU_CHECK_GATE - loaded state was not restored"
+    )
+    assert query_run_test_rig_filament_sensor("toolhead_sensor"), (
+        "toolhead_sensor not triggered after MMU_CHECK_GATE - loaded state was not restored"
+    )

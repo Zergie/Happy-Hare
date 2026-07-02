@@ -9,4 +9,6 @@ disable=attribute-defined-outside-init, consider-using-f-string, too-many-lines,
 max-bool-expr=6
 
 [MASTER]
+jobs=2
+persistent=yes
 ignore=mmu_test.py

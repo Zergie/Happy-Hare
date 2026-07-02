@@ -4,7 +4,64 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Sync Klipper/Kalico extras links",
+            "icon": {
+                "id": "sync",
+                "color": "terminal.ansiCyan"
+            },
+            "type": "shell",
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "$sourceExtras = 'C:/git/YAMMU/Firmware/Happy-Hare/extras';",
+                "$sourceMmu = Join-Path $sourceExtras 'mmu';",
+                "$targetExtrasDirs = @('C:/git/klipper/klippy/extras', 'C:/git/kalico/klippy/extras');",
+                "if (-not (Test-Path $sourceExtras)) { throw \"Missing source extras dir: $sourceExtras\" };",
+                "if (-not (Test-Path $sourceMmu)) { throw \"Missing source mmu dir: $sourceMmu\" };",
+                "$managedSourceFiles = @(Get-ChildItem -Path $sourceExtras -File -Filter '*.py' | Select-Object -ExpandProperty FullName);",
+                "$sourcePylintRc = Join-Path $sourceExtras '.pylintrc';",
+                "if (Test-Path $sourcePylintRc) { $managedSourceFiles += $sourcePylintRc };",
+                "foreach ($targetExtras in $targetExtrasDirs) {",
+                "  if (-not (Test-Path $targetExtras)) { throw \"Missing target extras dir: $targetExtras\" };",
+                "  $existingManaged = @();",
+                "  $existingManaged += Get-ChildItem -Path $targetExtras -File -Filter '*.py' -ErrorAction SilentlyContinue;",
+                "  if (Test-Path (Join-Path $targetExtras '.pylintrc')) { $existingManaged += Get-Item -Path (Join-Path $targetExtras '.pylintrc') -Force };",
+                "  foreach ($item in $existingManaged) {",
+                "    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { continue };",
+                "    $targetValue = (Get-Item -Path $item.FullName -Force).Target;",
+                "    if ($targetValue -is [array]) { $targetValue = $targetValue[0] };",
+                "    if (-not $targetValue) { continue };",
+                "    $sourceCandidate = Join-Path $sourceExtras $item.Name;",
+                "    if ($targetValue -like 'C:/git/YAMMU/Firmware/Happy-Hare/extras/*' -and -not (Test-Path $sourceCandidate)) {",
+                "      Remove-Item -Path $item.FullName -Force;",
+                "      Write-Host \"Removed stale link: $($item.FullName)\";",
+                "    }",
+                "  }",
+                "  foreach ($src in $managedSourceFiles) {",
+                "    $dest = Join-Path $targetExtras (Split-Path $src -Leaf);",
+                "    if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force };",
+                "    New-Item -ItemType SymbolicLink -Path $dest -Target $src | Out-Null;",
+                "    Write-Host \"Linked file: $dest -> $src\";",
+                "  }",
+                "  $destMmu = Join-Path $targetExtras 'mmu';",
+                "  if (Test-Path $destMmu) { Remove-Item -Path $destMmu -Recurse -Force };",
+                "  New-Item -ItemType Junction -Path $destMmu -Target $sourceMmu | Out-Null;",
+                "  Write-Host \"Linked folder: $destMmu -> $sourceMmu\";",
+                "}",
+                "Write-Host 'Sync complete: klipper and kalico extras linked to Happy-Hare extras.';",
+                "}"
+            ],
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
             "label": "Export Code to Test Rig",
+            "icon": {
+                "id": "cloud-upload",
+                "color": "terminal.ansiBlue"
+            },
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -19,6 +76,10 @@
         },
         {
             "label": "Export Startup.gcode to Test Rig",
+            "icon": {
+                "id": "cloud-upload",
+                "color": "terminal.ansiCyan"
+            },
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -33,6 +94,10 @@
         },
         {
             "label": "Start on Test Rig",
+            "icon": {
+                "id": "debug-start",
+                "color": "terminal.ansiGreen"
+            },
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -49,11 +114,16 @@
         },
         {
             "label": "Stop on Test Rig",
+            "icon": {
+                "id": "debug-stop",
+                "color": "terminal.ansiRed"
+            },
             "type": "shell",
-            "command": "ssh",
-            "args": [
-                "klippy-test",
-                "pgrep -f klippy-env/bin/python && kill `pgrep -f klippy-env/bin/python`"
+            "command": [
+                "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
+                "ssh klippy-test 'pgrep -f klippy-env/bin/python && kill `pgrep -f klippy-env/bin/python`';",
+                "exit 0;",
+                "}"
             ],
             "problemMatcher": [],
             "group": {
@@ -62,7 +132,28 @@
             }
         },
         {
+            "label": "Restart on Test Rig",
+            "icon": {
+                "id": "debug-restart",
+                "color": "terminal.ansiYellow"
+            },
+            "dependsOn": [
+                "Stop on Test Rig",
+                "Start on Test Rig"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
             "label": "Run Startup.gcode on Test Rig",
+            "icon": {
+                "id": "play",
+                "color": "terminal.ansiGreen"
+            },
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -81,6 +172,10 @@
         },
         {
             "label": "FIRMWARE_RESTART on Test Rig",
+            "icon": {
+                "id": "history",
+                "color": "terminal.ansiYellow"
+            },
             "type": "shell",
             "command": [
                 "pwsh -NoProfile -ExecutionPolicy Bypass -Command {",
@@ -98,6 +193,10 @@
         },
         {
             "label": "Get klippy.log from Test Rig",
+            "icon": {
+                "id": "file-text",
+                "color": "terminal.ansiWhite"
+            },
             "type": "process",
             "command": ".\\.venv\\Scripts\\python.exe",
             "args": [
@@ -117,6 +216,10 @@
         },
         {
             "label": "Plot PWM Graph",
+            "icon": {
+                "id": "graph",
+                "color": "terminal.ansiMagenta"
+            },
             "type": "process",
             "command": "c:/GIT/YAMMU/Firmware/Happy-Hare/.venv/Scripts/python.exe",
             "args": [

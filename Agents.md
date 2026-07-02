@@ -45,6 +45,16 @@
 - Wiki deep dives: `Happy-Hare.wiki/` (architecture, hardware/configuration, troubleshooting)
 - Config references: wiki pages for `mmu_hardware.cfg`, `mmu.cfg`, and related setup guides
 
+### Reference Docs Anchor
+- Prefer MMU operation deep-dives in `docs/` as canonical behavior references when answering MMU operation questions.
+- Anchor convention: `docs/MMU_<OPERATION>.md` (one file per operation, command-focused).
+- Discovery rule: when user asks about an MMU operation, check for matching `docs/MMU_*.md` first, then fall back to source code.
+- Current anchored examples:
+  - `docs/MMU_CHECK_GATE.md` - expected behavior and filament movement sequence for `MMU_CHECK_GATE`
+  - `docs/MMU_LOAD.md` - load behavior, bypass/extruder-only path, and load-sequence macro hook for `MMU_LOAD`
+  - `docs/MMU_TEST_MOVE.md` - motor-mode behavior and movement routing for `MMU_TEST_MOVE` (`gear`, `extruder`, `gear+extruder`, `synced`)
+- Keep this list updated as new operation deep-dives are added.
+
 ## Common Pitfalls
 - Breaking `lookup_object(...)` identifier contracts.
 - Adding duplicate queue instances per MCU.

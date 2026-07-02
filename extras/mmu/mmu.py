@@ -5920,7 +5920,20 @@ class Mmu:
                     if self.log_enabled(self.LOG_STEPPER):
                         self.log_stepper("%s MOVE: dist=%.1f, speed=%.1f, accel=%.1f, wait=%s" % (motor.upper(), dist, speed, accel, wait))
                     if bldc_active_move:
-                        bldc.start_move(dist, speed)
+                        # For a synced gear+extruder move that we will wait on, the extruder
+                        # stepper's real move duration (look-ahead planning, junction/S-curve
+                        # smoothing, accel/decel overhead, etc.) can't be reliably predicted from
+                        # dist/speed/accel alone. Rather than guess a matching stop time, hold the
+                        # BLDC open-ended (dist=None) and let the explicit bldc.stop() below --
+                        # issued only after movequeues_wait() confirms the real stepper move has
+                        # actually finished -- provide the true, event-driven stop signal. This
+                        # prevents the BLDC dying early and stalling the still-moving extruder
+                        # (missed steps/clicking).
+                        if motor == "gear+extruder" and wait:
+                            bldc_speed = speed if dist >= 0. else -speed
+                            bldc.start_move(None, bldc_speed)
+                        else:
+                            bldc.start_move(dist, speed)
                     if bldc_active_move and motor == "gear":
                         pause_time = abs(dist) / max(speed, 1e-6)
                         if wait:
@@ -6023,6 +6036,8 @@ class Mmu:
 
         if speed is None:
             speed = self.gear_homing_speed if motor == "gear" else min(self.gear_homing_speed, self.extruder_homing_speed)
+        if accel is None:
+            accel = min(max(self.gear_from_buffer_accel, self.gear_from_spool_accel), self.extruder_accel)
 
         if self.gate_selected >= 0:
             adjust = self.gate_speed_override[self.gate_selected] / 100.
@@ -6041,29 +6056,47 @@ class Mmu:
             if motor == "gear+extruder":
                 self.mmu_toolhead.sync(MmuToolHead.EXTRUDER_SYNCED_TO_GEAR)
                 self._adjust_gear_current(percent=self.sync_gear_current, reason="for extruder synced homing")
-                # For gear+extruder homing, command both BLDC and extruder to move concurrently
+                # Drive the synced extruder stepper with a real homing move so it halts exactly at
+                # the endstop (the toolhead sensor has the extruder stepper registered for this),
+                # while spinning the BLDC gear concurrently (dist=None so it doesn't
+                # self-terminate early). The homing move returning is the event that the filament
+                # reached the sensor, so the outer finally stops the BLDC right after -- keeping
+                # gear (BLDC) and extruder aligned instead of letting the extruder over-run the full
+                # open-loop distance after the BLDC quit early.
+                bldc_speed = speed if dist >= 0. else -speed
+                bldc.start_move(None, bldc_speed)
+                hmove = HomingMove(self.printer, endstops, self.mmu_toolhead)
                 pos[1] += dist
-                self.mmu_toolhead.move(pos, speed)
-                bldc.start_move(dist, speed)
+                poll_source = "endstop"
+                try:
+                    with self.wrap_accel(accel):
+                        hmove.homing_move(pos, speed, probe_pos=True, triggered=target_sensor_state, check_triggered=True)
+                    homed = True
+                except self.printer.command_error as e:
+                    homed = False
+                    if self.log_enabled(self.LOG_STEPPER):
+                        self.log_stepper("BLDC synced homing did not home: %s" % str(e))
+                halt_pos = self.mmu_toolhead.get_position()
+                actual = halt_pos[1] - init_pos
             else:
                 bldc.start_move(dist, speed)
-            start_time = self.reactor.monotonic()
-            poll_interval = 0.01
-            poll_source = "none"
-            while (self.reactor.monotonic() - start_time) < timeout:
-                sensor_state, poll_source = _read_endstop_state()
-                if sensor_state is not None and sensor_state == target_sensor_state:
-                    homed = True
-                    bldc.stop()
-                    break
-                self.reactor.pause(self.reactor.monotonic() + poll_interval)
+                start_time = self.reactor.monotonic()
+                poll_interval = 0.01
+                poll_source = "none"
+                while (self.reactor.monotonic() - start_time) < timeout:
+                    sensor_state, poll_source = _read_endstop_state()
+                    if sensor_state is not None and sensor_state == target_sensor_state:
+                        homed = True
+                        bldc.stop()
+                        break
+                    self.reactor.pause(self.reactor.monotonic() + poll_interval)
 
-            time_elapsed = min(self.reactor.monotonic() - start_time, timeout)
-            moved = min(abs(dist), speed * time_elapsed)
-            actual = move_sign * moved
-            pos[1] = init_pos + actual
-            self.mmu_toolhead.set_position(pos)
-            halt_pos = self.mmu_toolhead.get_position()
+                time_elapsed = min(self.reactor.monotonic() - start_time, timeout)
+                moved = min(abs(dist), speed * time_elapsed)
+                actual = move_sign * moved
+                pos[1] = init_pos + actual
+                self.mmu_toolhead.set_position(pos)
+                halt_pos = self.mmu_toolhead.get_position()
         finally:
             if homed and motor == "gear":
                 bldc.brake_to_stop()

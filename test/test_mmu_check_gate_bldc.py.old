@@ -1,0 +1,351 @@
+import contextlib
+import importlib.util
+import os
+import sys
+import types
+
+
+class _Dummy:
+    pass
+
+
+class _DummyToolhead:
+    def __init__(self):
+        self._position = [0.0, 5.0, 0.0]
+
+    def get_position(self):
+        return list(self._position)
+
+    def set_position(self, position):
+        self._position = list(position)
+
+
+class _FakeGcmd:
+    def __init__(self, params, commandline="MMU_CHECK_GATE"):
+        self._params = dict(params)
+        self._commandline = commandline
+
+    def get_commandline(self):
+        return self._commandline
+
+    def get(self, key, default=None):
+        return self._params.get(key, default)
+
+    def get_int(self, key, default=None, minval=None, maxval=None):
+        if key not in self._params:
+            return default
+        value = int(self._params.get(key, default))
+        if minval is not None and value < minval:
+            raise RuntimeError("%s below min" % key)
+        if maxval is not None and value > maxval:
+            raise RuntimeError("%s above max" % key)
+        return value
+
+
+class _FakeMmuForCheckGate:
+    TOOL_GATE_UNKNOWN = -1
+    TOOL_GATE_BYPASS = -2
+    GATE_EMPTY = 0
+    GATE_AVAILABLE = 1
+    FILAMENT_POS_UNLOADED = 0
+    FILAMENT_POS_LOADED = 10
+    FORM_TIP_STANDALONE = 2
+    PURGE_NONE = 0
+    ACTION_CHECKING = 7
+    CALIBRATED_ESSENTIAL = 0b01111
+
+    def __init__(self, MmuError, *, load_behavior=None, unload_behavior=None):
+        self._MmuError = MmuError
+        self._load_behavior = load_behavior
+        self._unload_behavior = unload_behavior
+
+        self.num_gates = 2
+        self.gate_selected = 0
+        self.tool_selected = 0
+        self.filament_pos = self.FILAMENT_POS_UNLOADED
+        self.ttg_map = [0, 1]
+        self.gate_status = [self.GATE_EMPTY, self.GATE_EMPTY]
+        self.mmu_toolhead = _DummyToolhead()
+
+        self._in_print = False
+        self._printing = False
+        self._handled_errors = []
+        self._filament_state_updates = []
+        self._encoder_inits = 0
+        self._selected_gate = None
+        self._calls = []
+        self.last_statistics = {}
+
+    def _null_context(self):
+        return contextlib.nullcontext()
+
+    def _record(self, call_name, *args):
+        self._calls.append((call_name, args))
+
+    def log_to_file(self, _):
+        return None
+
+    def check_if_disabled(self):
+        return False
+
+    def check_if_not_homed(self):
+        return False
+
+    def check_if_bypass(self):
+        return False
+
+    def _fix_started_state(self):
+        return None
+
+    def check_if_not_calibrated(self, *_args, **_kwargs):
+        return False
+
+    def wrap_sync_gear_to_extruder(self):
+        return self._null_context()
+
+    def _wrap_suspend_filament_monitoring(self):
+        return self._null_context()
+
+    def _wrap_suspendwrite_variables(self):
+        return self._null_context()
+
+    def wrap_action(self, _):
+        return self._null_context()
+
+    def wrap_suppress_visual_log(self):
+        return self._null_context()
+
+    def _set_tool_selected(self, tool):
+        self._record("set_tool_selected", tool)
+        self.tool_selected = tool
+
+    def selected_tool_string(self, tool=None):
+        return "T%d" % (self.tool_selected if tool is None else tool)
+
+    def _note_toolchange(self, value):
+        self._record("note_toolchange", value)
+
+    def _save_toolhead_position_and_park(self, phase):
+        self._record("park", phase)
+
+    def _unload_tool(self, form_tip=None):
+        self._record("unload_tool", form_tip)
+
+    def _persist_gate_statistics(self):
+        self._record("persist_gate_statistics")
+
+    def _continue_after(self, phase):
+        self._record("continue_after", phase)
+
+    def _select_and_load_tool(self, tool, purge=None):
+        self._record("select_and_load_tool", tool, purge)
+
+    def select_tool(self, tool):
+        self._record("select_tool", tool)
+        self.tool_selected = tool
+
+    def select_bypass(self):
+        self._record("select_bypass")
+
+    def select_gate(self, gate):
+        self._record("select_gate", gate)
+        self._selected_gate = gate
+        self.gate_selected = gate
+
+    def _load_gate(self, allow_retry=False):
+        self._record("load_gate", self._selected_gate, allow_retry)
+        if self._load_behavior is not None:
+            return self._load_behavior(self._selected_gate)
+        return 0.0
+
+    def _set_gate_status(self, gate, status):
+        self._record("set_gate_status", gate, status)
+        self.gate_status[gate] = status
+
+    def _unload_gate(self):
+        self._record("unload_gate", self._selected_gate)
+        if self._unload_behavior is not None:
+            return self._unload_behavior(self._selected_gate)
+        return 0.0, 0.0
+
+    def _set_filament_pos_state(self, state, silent=False):
+        self._record("set_filament_pos_state", state, silent)
+        self._filament_state_updates.append((state, silent))
+        self.filament_pos = state
+
+    def is_in_print(self):
+        return self._in_print
+
+    def is_printing(self):
+        return self._printing
+
+    def _initialize_encoder(self):
+        self._record("initialize_encoder")
+        self._encoder_inits += 1
+
+    def _mmu_visual_to_string(self):
+        return "MMU STATE"
+
+    def handle_mmu_error(self, message):
+        self._record("handle_mmu_error", message)
+        self._handled_errors.append(message)
+
+    def log_debug(self, _):
+        return None
+
+    def log_info(self, _):
+        return None
+
+    def log_always(self, _):
+        return None
+
+
+def _install_fake_mmu_dependencies(repo_root):
+    extras_dir = os.path.join(repo_root, "extras")
+    mmu_dir = os.path.join(extras_dir, "mmu")
+
+    sys.modules.pop("extras", None)
+    sys.modules.pop("extras.mmu", None)
+    sys.modules.pop("extras.mmu.mmu", None)
+
+    extras_pkg = types.ModuleType("extras")
+    extras_pkg.__path__ = [extras_dir]
+    sys.modules["extras"] = extras_pkg
+
+    mmu_pkg = types.ModuleType("extras.mmu")
+    mmu_pkg.__path__ = [mmu_dir]
+    sys.modules["extras.mmu"] = mmu_pkg
+
+    sys.modules["chelper"] = types.ModuleType("chelper")
+
+    homing_module = types.ModuleType("extras.homing")
+    homing_module.Homing = _Dummy
+    homing_module.HomingMove = _Dummy
+    sys.modules["extras.homing"] = homing_module
+
+    tmc_module = types.ModuleType("extras.tmc")
+    tmc_module.TMCCommandHelper = _Dummy
+    sys.modules["extras.tmc"] = tmc_module
+
+    mmu_machine_module = types.ModuleType("extras.mmu_machine")
+    mmu_machine_module.MmuToolHead = _Dummy
+    sys.modules["extras.mmu_machine"] = mmu_machine_module
+
+    mmu_sensors_module = types.ModuleType("extras.mmu_sensors")
+    mmu_sensors_module.MmuRunoutHelper = _Dummy
+    sys.modules["extras.mmu_sensors"] = mmu_sensors_module
+
+    mmu_shared_module = types.ModuleType("extras.mmu.mmu_shared")
+
+    class MmuError(Exception):
+        pass
+
+    mmu_shared_module.MmuError = MmuError
+    sys.modules["extras.mmu.mmu_shared"] = mmu_shared_module
+
+    simple_class_modules = {
+        "extras.mmu.mmu_logger": "MmuLogger",
+        "extras.mmu.mmu_test": "MmuTest",
+        "extras.mmu.mmu_sensor_manager": "MmuSensorManager",
+        "extras.mmu.mmu_led_manager": "MmuLedManager",
+        "extras.mmu.mmu_sync_feedback_manager": "MmuSyncFeedbackManager",
+        "extras.mmu.mmu_calibration_manager": "MmuCalibrationManager",
+        "extras.mmu.mmu_environment_manager": "MmuEnvironmentManager",
+        "extras.mmu.mmu_gear_bldc": "MmuGearBldc",
+    }
+    for module_name, class_name in simple_class_modules.items():
+        module = types.ModuleType(module_name)
+        setattr(module, class_name, _Dummy)
+        sys.modules[module_name] = module
+
+    mmu_selector_module = types.ModuleType("extras.mmu.mmu_selector")
+    sys.modules["extras.mmu.mmu_selector"] = mmu_selector_module
+
+    mmu_utils_module = types.ModuleType("extras.mmu.mmu_utils")
+    mmu_utils_module.DebugStepperMovement = _Dummy
+    mmu_utils_module.PurgeVolCalculator = _Dummy
+    sys.modules["extras.mmu.mmu_utils"] = mmu_utils_module
+
+    return mmu_shared_module.MmuError
+
+
+def _load_mmu_module(repo_root):
+    module_path = os.path.join(repo_root, "extras", "mmu", "mmu.py")
+    MmuError = _install_fake_mmu_dependencies(repo_root)
+
+    spec = importlib.util.spec_from_file_location("extras.mmu.mmu", module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["extras.mmu.mmu"] = module
+    spec.loader.exec_module(module)
+    return module, MmuError
+
+
+def test_mmu_check_gate_bldc_success_marks_gate_available_and_reinitializes_encoder():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu_module, MmuError = _load_mmu_module(repo_root)
+
+    fake = _FakeMmuForCheckGate(MmuError)
+    gcmd = _FakeGcmd({"GATE": 0})
+
+    mmu_module.Mmu.cmd_MMU_CHECK_GATE(fake, gcmd)
+
+    assert fake.gate_status[0] == fake.GATE_AVAILABLE
+    assert fake._encoder_inits == 1
+    assert fake._handled_errors == []
+
+
+def test_mmu_check_gate_bldc_load_failure_marks_gate_empty_and_resets_gear_position():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu_module, MmuError = _load_mmu_module(repo_root)
+
+    def fail_load(_gate):
+        raise MmuError("BLDC load failed")
+
+    fake = _FakeMmuForCheckGate(MmuError, load_behavior=fail_load)
+    gcmd = _FakeGcmd({"GATE": 0})
+
+    mmu_module.Mmu.cmd_MMU_CHECK_GATE(fake, gcmd)
+
+    assert fake.gate_status[0] == fake.GATE_EMPTY
+    assert fake._filament_state_updates[-1][0] == fake.FILAMENT_POS_UNLOADED
+    assert fake.mmu_toolhead.get_position()[1] == 0.0
+    assert fake._encoder_inits == 1
+    assert fake._handled_errors == []
+
+
+def test_mmu_check_gate_bldc_failure_in_print_routes_to_handle_error():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu_module, MmuError = _load_mmu_module(repo_root)
+
+    def fail_load(_gate):
+        raise MmuError("BLDC homing failed")
+
+    fake = _FakeMmuForCheckGate(MmuError, load_behavior=fail_load)
+    fake._in_print = True
+    fake._printing = True
+    gcmd = _FakeGcmd({"GATE": 0})
+
+    mmu_module.Mmu.cmd_MMU_CHECK_GATE(fake, gcmd)
+
+    assert fake.gate_status[0] == fake.GATE_EMPTY
+    assert len(fake._handled_errors) == 1
+    assert "Required Gate 0 marked EMPTY" in fake._handled_errors[0]
+
+
+def test_mmu_check_gate_bldc_loaded_state_runs_unload_then_restore_load():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    mmu_module, MmuError = _load_mmu_module(repo_root)
+
+    fake = _FakeMmuForCheckGate(MmuError)
+    fake.filament_pos = fake.FILAMENT_POS_LOADED
+    fake.tool_selected = 1
+    gcmd = _FakeGcmd({"GATE": 0})
+
+    mmu_module.Mmu.cmd_MMU_CHECK_GATE(fake, gcmd)
+
+    call_names = [name for name, _ in fake._calls]
+    assert "unload_tool" in call_names
+    assert "select_and_load_tool" in call_names
+
+    restore_call = [args for name, args in fake._calls if name == "select_and_load_tool"]
+    assert restore_call[-1] == (1, fake.PURGE_NONE)

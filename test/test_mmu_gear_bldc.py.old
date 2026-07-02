@@ -1,0 +1,423 @@
+import os
+from unittest.mock import MagicMock
+
+import pytest
+
+from test.support.bldc_fakes import (
+    FakeConfig,
+    FakeExtruder,
+    FakeMmu,
+    FakeMove,
+    FakePrinter,
+    FakeToolhead,
+    load_mmu_gear_bldc_module,
+)
+
+
+@pytest.fixture()
+def bldc_module():
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    return load_mmu_gear_bldc_module(repo_root)
+
+
+@pytest.fixture()
+def runtime_env():
+    extruder = FakeExtruder()
+    toolhead = FakeToolhead(extruder=extruder)
+    printer = FakePrinter(toolhead=toolhead)
+    mmu = FakeMmu(toolhead=toolhead, gate_selected=0)
+    return printer, mmu, extruder
+
+
+@pytest.fixture()
+def bldc(runtime_env, bldc_module):
+    printer, mmu, _ = runtime_env
+    config = FakeConfig(
+        printer,
+        {
+            "dir_pin": "D0",
+            "pwm_pin": "P0",
+            "pwm_min": 0.2,
+            "pwm_max": 1.0,
+            "rotation_distance": 2.0,
+            "direction_map": [0],
+            "kick_start_time": 0.05,
+            "brake_pwm": 0.8,
+            "brake_max_time": 0.2,
+        },
+    )
+    return bldc_module.MmuGearBldc(config, mmu)
+
+
+def test_motion_descriptor_has_duration(bldc_module):
+    """Verify base descriptor exposes duration; needed so fixed-cadence callback can prune expired windows."""
+    descriptor = bldc_module.MotionDescriptor(1.23, 12.5, True, -1, duration=0.5)
+    assert descriptor.duration == pytest.approx(0.5)
+    assert descriptor.print_time == pytest.approx(1.23)
+
+
+def test_motion_stop_has_infinity_duration(bldc_module):
+    """Verify stop descriptor has infinite duration so it never expires via pruning."""
+    stop = bldc_module.MotionStop(5.0)
+    assert stop.duration == bldc_module.INFINITY
+
+
+def test_motion_pwm_direct_has_finite_duration(bldc_module):
+    """Verify direct PWM descriptor carries its dwell window; needed to schedule brake phases correctly."""
+    motion = bldc_module.MotionPwmDirect(2.0, 0.8, 0.35, 1)
+    assert motion.duration == pytest.approx(0.35)
+
+
+def test_motion_trapzoid_duration_and_get_speed(bldc_module):
+    """Verify trapezoid duration and get_speed API; needed so callback samples speed per tick correctly."""
+    motion = bldc_module.MotionTrapzoid(1.0, 10.0, 20.0, 5.0, direction=1)
+    assert motion.duration == pytest.approx(2.0)
+    assert motion.end_print_time == pytest.approx(3.0)
+    assert motion.get_speed(1.0) == pytest.approx(10.0)
+    assert motion.get_speed(2.0) == pytest.approx(15.0)
+    assert motion.get_speed(3.0) == pytest.approx(20.0)
+    assert motion.get_speed(0.5) == pytest.approx(10.0)  # before start clamps to start_speed
+    assert motion.get_speed(4.0) == pytest.approx(20.0)  # after end clamps to end_speed
+
+
+def test_process_move_sync_monitor_activate_and_deactivate(runtime_env, bldc_module):
+    """Verify process_move hook lifecycle; needed to prevent lingering hooks across sync mode transitions."""
+    _, mmu, _ = runtime_env
+    monitor = bldc_module.ProcessMoveSyncMonitor(mmu)
+    bldc = MagicMock(sync_active=True, section_name="unit0")
+
+    assert monitor.activate(bldc) is True
+    assert monitor.hook_enabled is True
+
+    monitor.deactivate(bldc)
+    assert monitor.hook_enabled is False
+    assert monitor.active_bldc is None
+
+
+def test_process_move_sync_monitor_rejects_foreign_owner(runtime_env, bldc_module):
+    """Verify monitor refuses foreign hook ownership; needed to protect integration boundaries and hook safety."""
+    _, mmu, extruder = runtime_env
+    monitor = bldc_module.ProcessMoveSyncMonitor(mmu)
+    extruder._hh_bldc_process_move_owner = object()
+
+    ok = monitor.activate(MagicMock(sync_active=True, section_name="unit0"))
+    assert ok is False
+    assert mmu.warning_logs
+
+
+def test_process_move_sync_monitor_wrapped_handler_pushes_move(runtime_env, bldc_module):
+    """Verify wrapped process_move forwards trapzoid data; needed so BLDC follows extruder-driven sync motion."""
+    _, mmu, extruder = runtime_env
+    monitor = bldc_module.ProcessMoveSyncMonitor(mmu)
+    bldc = MagicMock(sync_active=True, section_name="unit0")
+
+    assert monitor.activate(bldc) is True
+    move = FakeMove(axes_r=[0.0, 0.0, 0.0, 1.0], start_v=2.0, cruise_v=3.0, end_v=1.0)
+    extruder.process_move(12.0, move, 3)
+
+    bldc.queue_trapzoid_move.assert_called_once_with(move, 1.0, 12.0, "process_move_push")
+
+
+def test_bldc_tachometer_has_tachometer_when_pin_configured(runtime_env, bldc_module):
+    """Verify tachometer is enabled by config pin; needed for closed-loop BLDC control paths."""
+    printer, mmu, _ = runtime_env
+
+    class DummyBldc:
+        def __init__(self):
+            self.mmu = mmu
+            self.section_name = "unit0"
+            self.reactor = printer.get_reactor()
+            self.printer = printer
+            self.mcu_pwm_pin = bldc_module.MCU_queued_pwm(FakeConfig(printer, {}), {"pin": "P0"})
+            self.mcu = self.mcu_pwm_pin.get_mcu()
+
+        def rpm_to_pwm(self, rpm):
+            return min(1.0, max(0.0, rpm / 1000.0))
+
+        def get_effective_max_rpm(self):
+            return 1000.0
+
+    cfg = FakeConfig(printer, {"tachometer_pin": "T0", "pwm_min": 0.2, "pwm_max": 1.0})
+    tach = bldc_module.BldcTachometer(DummyBldc(), cfg)
+    assert tach.has_tachometer() is True
+
+
+def test_bldc_tachometer_stop_sets_stopped_state(runtime_env, bldc_module):
+    """Verify tachometer stop resets state and command; needed to avoid stale PID influence after stops."""
+    printer, mmu, _ = runtime_env
+
+    class DummyBldc:
+        def __init__(self):
+            self.mmu = mmu
+            self.section_name = "unit0"
+            self.reactor = printer.get_reactor()
+            self.printer = printer
+            self.mcu_pwm_pin = bldc_module.MCU_queued_pwm(FakeConfig(printer, {}), {"pin": "P0"})
+            self.mcu = self.mcu_pwm_pin.get_mcu()
+
+        def rpm_to_pwm(self, rpm):
+            return min(1.0, max(0.0, rpm / 1000.0))
+
+        def get_effective_max_rpm(self):
+            return 1000.0
+
+    cfg = FakeConfig(printer, {"tachometer_pin": "T0", "pwm_min": 0.2, "pwm_max": 1.0})
+    tach = bldc_module.BldcTachometer(DummyBldc(), cfg)
+    tach.enabled = True
+    tach.set_commanded(400.0, "move")
+    tach.stop()
+
+    assert tach.control_reason == "stopped"
+    assert tach.commanded_rpm == pytest.approx(0.0)
+
+
+def test_bldc_tachometer_handle_tachometer_first_and_second_samples(runtime_env, bldc_module):
+    """Verify tach samples bootstrap then compute RPM; needed for robust first-sample behavior in PID loops."""
+    printer, mmu, _ = runtime_env
+
+    class DummyBldc:
+        def __init__(self):
+            self.mmu = mmu
+            self.section_name = "unit0"
+            self.reactor = printer.get_reactor()
+            self.printer = printer
+            self.mcu_pwm_pin = bldc_module.MCU_queued_pwm(FakeConfig(printer, {}), {"pin": "P0"})
+            self.mcu = self.mcu_pwm_pin.get_mcu()
+
+        def rpm_to_pwm(self, rpm):
+            return min(1.0, max(0.0, rpm / 1000.0))
+
+        def get_effective_max_rpm(self):
+            return 1000.0
+
+    cfg = FakeConfig(printer, {"tachometer_pin": "T0", "pwm_min": 0.2, "pwm_max": 1.0})
+    tach = bldc_module.BldcTachometer(DummyBldc(), cfg)
+    tach.enabled = True
+    tach.set_commanded(500.0, "move")
+
+    tach.handle_tachometer(1.0, 10.0, 1.0)
+    assert tach.last_tach_eventtime == pytest.approx(1.0)
+
+    tach.handle_tachometer(1.1, 40.0, 1.1)
+    assert tach.last_tach_rpm > 0.0
+
+
+def test_mmu_gear_bldc_direction_map_invalid_length_raises(runtime_env, bldc_module):
+    """Verify invalid direction_map length is rejected; needed to prevent gate-to-direction miswiring bugs."""
+    printer, mmu, _ = runtime_env
+    config = FakeConfig(
+        printer,
+        {
+            "dir_pin": "D0",
+            "pwm_pin": "P0",
+            "direction_map": [0, 1],
+        },
+    )
+    with pytest.raises(RuntimeError):
+        bldc_module.MmuGearBldc(config, mmu, first_gate=0, num_gates=1)
+
+
+def test_mmu_gear_bldc_supports_gate_and_direction_mapping(bldc_module, runtime_env):
+    """Verify gate support and sign mapping; needed so BLDC direction follows per-gate configuration."""
+    printer, mmu, _ = runtime_env
+    config = FakeConfig(
+        printer,
+        {
+            "dir_pin": "D0",
+            "pwm_pin": "P0",
+            "direction_map": [1],
+            "pwm_min": 0.2,
+            "pwm_max": 1.0,
+        },
+    )
+    uut = bldc_module.MmuGearBldc(config, mmu, first_gate=0, num_gates=1)
+
+    mapped_dist, map_value, gate = uut._map_distance_for_gate(5.0, gate=0)
+    assert (mapped_dist, map_value, gate) == (-5.0, 1, 0)
+    assert uut.supports_gate(0) is True
+    assert uut.supports_gate(1) is False
+
+
+def test_mmu_gear_bldc_set_calibration_map_none_falls_back_linear(bldc):
+    """Verify missing map falls back to linear mode; needed to keep BLDC operable without calibration data."""
+    ok, reason = bldc.set_calibration_map(None)
+    assert ok is False
+    assert reason == "map_missing"
+    assert bldc.map_mode == "linear"
+
+
+def test_mmu_gear_bldc_rpm_to_pwm_linear_when_no_map(bldc):
+    """Verify rpm_to_pwm uses linear fallback without map; needed for safe open-loop startup behavior."""
+    bldc.calibration_map_points = []
+    pwm = bldc.rpm_to_pwm(1000.0)
+    assert bldc.map_mode == "linear"
+    assert 0.0 <= pwm <= 1.0
+
+
+def test_mmu_gear_bldc_rpm_to_pwm_uses_map_when_available(bldc):
+    """Verify mapped conversion when tach and map exist; needed to preserve calibrated BLDC response."""
+    bldc.tachometer.has_tachometer = lambda: True
+    bldc.calibration_map_points = [
+        {"pwm": 0.2, "rpm": 1000.0},
+        {"pwm": 0.5, "rpm": 2500.0},
+        {"pwm": 0.9, "rpm": 4500.0},
+    ]
+    pwm = bldc.rpm_to_pwm(2600.0)
+    assert bldc.map_mode == "mapped"
+    assert pwm == pytest.approx(0.5)
+
+
+def test_mmu_gear_bldc_start_move_queues_motion_and_timer(bldc):
+    """Verify start_move enqueues descriptors and timer; needed so standalone BLDC moves actually execute."""
+    bldc.start_move(dist=20.0, speed=10.0)
+    assert bldc.motion_state == bldc.MOTION_STATE_MOVING
+    assert bldc.motion_queue
+    assert bldc.motion_timer is not None
+
+
+def test_mmu_gear_bldc_motion_timer_callback_dispatches_and_stops(bldc):
+    """Verify timer callback dispatches then stops; needed to prevent BLDC remaining energized after move."""
+    bldc.start_move(dist=1.0, speed=1.0)
+    reactor = bldc.reactor
+    wake = bldc._motion_timer_callback(reactor.monotonic())
+    assert wake is not None
+
+    reactor.pause(reactor.monotonic() + 2.0)
+    bldc._motion_timer_callback(reactor.monotonic())
+    assert bldc.last_pwm == pytest.approx(0.0)
+
+
+def test_mmu_gear_bldc_pwm_callback_writes_queued_pin(bldc):
+    """Verify queued PWM callback reaches the MCU pin; needed to prevent BLDC from logging motion without output."""
+    result = bldc._set_pwm_callback(1.0, 0.5)
+
+    assert result == ''
+    assert bldc.mcu_pwm_pin.pwm_calls == [(1.0, 0.5)]
+
+    result = bldc._set_pwm_callback(1.05, 0.5)
+
+    assert result == 'discard'
+    assert bldc.mcu_pwm_pin.pwm_calls == [(1.0, 0.5)]
+
+
+def test_mmu_gear_bldc_delayed_callback_dispatches_when_still_active(bldc, bldc_module):
+    """Verify late callback dispatches descriptor when still within its duration window."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    # current_print_time at eventtime=2.0 is 2.0 (FakeMcu returns float(eventtime))
+    # Descriptor window: [1.9, 1.9+0.5=2.4] -> still active at current_print_time=2.0
+    bldc.motion_queue = [
+        (bldc_module.MotionPwmDirect(direction=1, pwm=1.0, duration=0.5, print_time=1.9), "move"),
+        (bldc_module.MotionStop(print_time=2.4), "move"),
+    ]
+
+    wake = bldc._motion_timer_callback(eventtime=2.0)
+
+    assert wake is not None
+    assert any("BLDC_MOTION: pwm_direct" in message for message in bldc.mmu.stepper_logs)
+
+
+def test_mmu_gear_bldc_brake_to_stop_falls_back_to_stop_when_not_active(bldc):
+    """Verify low-activity brake request falls back to stop; needed to avoid unnecessary reverse brake pulses."""
+    bldc.last_pwm = 0.01
+    bldc.last_dir = 1
+    bldc.brake_to_stop()
+    assert bldc.motion_state == bldc.MOTION_STATE_STOP
+
+
+def test_mmu_gear_bldc_brake_to_stop_queues_brake_descriptors(bldc):
+    """Verify active brake path queues brake descriptors; needed for controlled BLDC deceleration."""
+    bldc.last_pwm = 0.7
+    bldc.last_dir = 1
+    bldc.brake_to_stop()
+
+    assert bldc.motion_state == bldc.MOTION_STATE_BRAKE
+    assert len(bldc.motion_queue) == 2
+    assert bldc.motion_queue[0][0].__class__.__name__ == "MotionPwmDirect"
+
+
+def test_mmu_gear_bldc_handle_connect_sets_monitor(bldc):
+    """Verify connect handler resolves sync monitor; needed so BLDC sync hooks are validated at startup."""
+    bldc._handle_connect()
+    assert bldc.active_sync_monitor is not None
+
+
+def test_mmu_gear_bldc_handle_synced_and_unsynced_toggle(bldc):
+    """Verify synced and unsynced handlers toggle monitor state; needed for stable mode transitions."""
+    bldc.active_sync_monitor = MagicMock()
+
+    bldc._handle_synced()
+    assert bldc.sync_active is True
+    bldc.active_sync_monitor.activate.assert_called_once_with(bldc)
+
+    bldc._handle_unsynced()
+    assert bldc.sync_active is False
+    bldc.active_sync_monitor.deactivate.assert_called_once_with(bldc)
+
+
+def test_mmu_gear_bldc_callback_fixed_cadence(bldc, bldc_module):
+    """Verify callback returns eventtime + motion_sample_time while queue has future candidates."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    future_time = bldc.mcu.estimated_print_time(bldc.reactor.monotonic()) + 10.0
+    bldc.motion_queue = [
+        (bldc_module.MotionDescriptor(future_time, 10.0, True, 1, duration=5.0), "move"),
+    ]
+    eventtime = bldc.reactor.monotonic()
+    wake = bldc._motion_timer_callback(eventtime)
+    # No candidates in next-tick window -> keep fixed cadence
+    assert wake == pytest.approx(eventtime + bldc.motion_sample_time, abs=1e-3)
+
+
+def test_mmu_gear_bldc_callback_duration_expiry_stops_timer(bldc, bldc_module):
+    """Verify expired descriptors are pruned and empty queue stops timer."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    # Advance time so current_print_time > descriptor window end (0.0 + 0.001 = 0.001)
+    bldc.reactor.pause(0.1)
+    bldc.motion_queue = [
+        (bldc_module.MotionDescriptor(0.0, 10.0, True, 1, duration=0.001), "move"),
+    ]
+    eventtime = bldc.reactor.monotonic()
+    wake = bldc._motion_timer_callback(eventtime)
+    assert wake == bldc.reactor.NEVER
+    assert bldc._motion_timer_running is False
+
+
+def test_mmu_gear_bldc_callback_stop_wins_when_no_non_stop(bldc, bldc_module):
+    """Verify MotionStop wins when no non-stop candidates; motor stops and queue clears."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    bldc.last_pwm = 0.5
+    current_pt = bldc.mcu.estimated_print_time(bldc.reactor.monotonic())
+    bldc.motion_queue = [
+        (bldc_module.MotionStop(current_pt - 0.001), "move"),
+    ]
+    eventtime = bldc.reactor.monotonic()
+    wake = bldc._motion_timer_callback(eventtime)
+    assert wake == bldc.reactor.NEVER
+    assert bldc.motion_queue == []
+
+
+def test_mmu_gear_bldc_callback_non_stop_beats_stop(bldc, bldc_module):
+    """Verify MotionStop is dropped when a non-stop descriptor is in the same tick window."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    current_pt = bldc.mcu.estimated_print_time(bldc.reactor.monotonic())
+    bldc.motion_queue = [
+        (bldc_module.MotionPwmDirect(current_pt - 0.001, 0.7, 0.1, 1), "move"),
+        (bldc_module.MotionStop(current_pt - 0.001), "move"),
+    ]
+    eventtime = bldc.reactor.monotonic()
+    wake = bldc._motion_timer_callback(eventtime)
+    # Timer keeps cadence; MotionPwmDirect was dispatched
+    assert wake == pytest.approx(eventtime + bldc.motion_sample_time, abs=1e-3)
+    assert any("BLDC_MOTION: pwm_direct" in msg for msg in bldc.mmu.stepper_logs)
+
+
+def test_mmu_gear_bldc_start_timer_only_when_stopped(bldc):
+    """Verify _start_motion_timer is a no-op if timer is already running."""
+    bldc.motion_state = bldc.MOTION_STATE_MOVING
+    bldc._motion_timer_running = True
+    bldc._ensure_motion_timer()
+    # Record current timer 'when' value
+    timer = bldc.motion_timer
+    original_when = timer["when"]
+    bldc._start_motion_timer()
+    # Should not have changed the scheduled time
+    assert timer["when"] == original_when

@@ -15,7 +15,7 @@ class Scenario:
 
 
 def _get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[5]
+    return Path(__file__).resolve().parents[1]
 
 
 def _build_scenarios() -> list[Scenario]:
