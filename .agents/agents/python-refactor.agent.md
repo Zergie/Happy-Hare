@@ -6,7 +6,7 @@ argument-hint: "Describe what to refactor and any constraints (e.g. preserve pub
 user-invocable: true
 ---
 
-Follow coding style from `.github/instructions/python-style.instructions.md`.
+Follow coding style from `.agents/instructions/python-style.instructions.md`.
 
 Refactor Python for clarity and minimalism.
 
@@ -94,7 +94,7 @@ Every line and every variable must justify its existence.
    python -m py_compile <file>
    → must succeed
 5. Run pylint helper test and ensure refactored file passes:
-  python -m pytest .github/skills/run-test-rig/tests/tools_helper/test_pylint_extras.py -q --maxfail=1
+  python -m pytest .agents/skills/run-test-rig/tests/tools_helper/test_pylint_extras.py -q --maxfail=1
   → the scenario for <file> must pass
 6. List every new function/helper introduced and justify it.
    - If not clearly justified → inline it back.

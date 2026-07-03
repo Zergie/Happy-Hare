@@ -221,5 +221,5 @@ For BLDC `MOTOR=gear`, `WAIT=0` is explicitly supported because queued BLDC stop
   - `start_move`
   - `queue_trapzoid_move`
   - `set_sync_enabled`, `_handle_synced`, `_handle_unsynced`
-- `.github/skills/run-test-rig/tests/no_filament_loaded/test_run_test_rig_bldc.py`
+- `.agents/skills/run-test-rig/tests/no_filament_loaded/test_run_test_rig_bldc.py`
   - scenario coverage for `MOTOR=gear` and `MOTOR=synced`

@@ -12,7 +12,7 @@
 - Keep changes small and local to owning module.
 - Match file-local naming and structure in `Happy-Hare/extras/**/*.py`.
 - Keep config-facing and integration contract names (example: `lookup_object(...)` identifiers) unless compatibility-safe migration is required.
-- For naming, follow `.github/skills/variable-naming/SKILL.md`.
+- For naming, follow `.agents/skills/variable-naming/SKILL.md`.
 
 ## Architecture
 - BLDC motor logic lives in `Happy-Hare/extras/mmu/mmu_gear_bldc.py`.
@@ -20,14 +20,14 @@
 - Keep sync behavior contracts in `Happy-Hare/extras/mmu/mmu_sync_controller.py`:
   - Preserve modes `gear`, `extruder`, `gear+extruder`, `extruder+gear`.
   - In `gear+extruder` and `extruder+gear`, moves must run concurrent, not sequential.
-- For BLDC constraints, follow `.github/instructions/bldc-guardrails.instructions.md`.
+- For BLDC constraints, follow `.agents/instructions/bldc-guardrails.instructions.md` (reference file; Codex does not auto-load `.agents/instructions`).
 
 ## Output Pin Conventions
 - Use queued pin writes for BLDC pwm/digital paths.
 - Do not call `set_pwm` or `set_digital` outside queue callbacks.
 - Use `output_pin.GCodeRequestQueue` when available; fallback queue behavior must match project guardrails.
 - Keep one queue per MCU; reuse it.
-- Full details: `.github/skills/output-pin-interactions/SKILL.md`.
+- Full details: `.agents/skills/output-pin-interactions/SKILL.md`.
 
 ## Build and Test
 - Preferred workflow: use existing VS Code tasks in `Happy-Hare` workspace folder:
@@ -37,7 +37,6 @@
   - `Stop on Test Rig`
   - `Run Startup.gcode on Test Rig`
   - `Read klippy.log on Test Rig`
-- For test execution guidance in chat, use `.github/prompts/run-test-rig.prompt.md`.
 
 ## Docs (Link, Do Not Duplicate)
 - Project overview: `README.md`

@@ -156,6 +156,7 @@ class BldcTachometer:
     TACH_VALID_MAX_AGE = 0.5
     CONTROL_DEADBAND_RPM = 50.
     CONTROL_MIN_RPM = 150.
+    CONTROL_DT_MAX_SAMPLE_FACTOR = 2.
 
     PID_PARAM_BASE = 255.
 
@@ -172,9 +173,9 @@ class BldcTachometer:
         self.tachometer_ppr = config.getint('tachometer_ppr', 9, minval=1)
         self.tachometer_sample_time = config.getfloat('tachometer_sample_time', 0.1, above=0.)
         self.tachometer_stale_time = config.getfloat('tachometer_stale_time', self.tachometer_sample_time * 3., above=0.)
-        self.control_kp = config.getfloat('tachometer_control_kp', 20.0, minval=0.) / self.PID_PARAM_BASE
-        self.control_ki = config.getfloat('tachometer_control_ki', 1125.0, minval=0.) / self.PID_PARAM_BASE
-        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 0.15, minval=0., maxval=1.)
+        self.control_kp = config.getfloat('tachometer_control_kp', 12.0, minval=0.) / self.PID_PARAM_BASE
+        self.control_ki = config.getfloat('tachometer_control_ki', 200.0, minval=0.) / self.PID_PARAM_BASE
+        self.control_max_delta_pwm = config.getfloat('tachometer_control_max_delta_pwm', 0.20, minval=0., maxval=1.)
 
         tachometer_pin = config.get('tachometer_pin', None)
         self.tachometer = None
@@ -186,7 +187,8 @@ class BldcTachometer:
 
         self.commanded_rpm = 0.
         self.commanded_source = None
-        self.last_tach_freq = self.last_tach_rpm = self.last_tach_error_rpm = 0.
+        self.last_tach_rpm = 0.
+        self.last_tach_error_rpm = 0.
         self.last_tach_eventtime = None
         self.control_correction_pwm = self.integral_correction_pwm = 0.
         self.control_reason = 'disabled'
@@ -264,7 +266,6 @@ class BldcTachometer:
     def get_status(self):
         has_tachometer = self.has_tachometer()
         return {
-            'tachometer_frequency': self.last_tach_freq,
             'tachometer_rpm': self.last_tach_rpm,
             'tachometer_error_rpm': self.commanded_rpm - self.last_tach_rpm,
             'control_enabled': has_tachometer and self.enabled,
@@ -279,6 +280,19 @@ class BldcTachometer:
         if error_rpm is not None:
             self.last_tach_error_rpm = error_rpm
 
+    def _log_control_state(self, print_time, control_dt):
+        self.mmu.log_stepper(
+            "BLDC_CONTROL: reason=%s commanded_rpm=%.1f tach_rpm=%.1f error_rpm=%.1f "
+            "correction_pwm=%.4f integral_pwm=%.4f control_dt=%.4f source=%s "
+            "print_time=%.6f unit=%s"
+            % (
+                self.control_reason, self.commanded_rpm, self.last_tach_rpm,
+                self.last_tach_error_rpm, self.control_correction_pwm,
+                self.integral_correction_pwm, control_dt, self.commanded_source,
+                print_time, self.section_name,
+            )
+        )
+
     def handle_tachometer(self, time, count, count_time):
         if self._tach_last_count is None:
             self._tach_last_count = count
@@ -290,11 +304,19 @@ class BldcTachometer:
         control_dt = delta_time if delta_time > 0. else (max(0., time - self.last_tach_eventtime) if self.last_tach_eventtime is not None else 0.)
         if control_dt <= 0.:
             control_dt = self.tachometer_sample_time
+        control_dt = min(control_dt, self.tachometer_sample_time * self.CONTROL_DT_MAX_SAMPLE_FACTOR)
         self._tach_last_count = count
         self._tach_last_count_time = count_time
         self.last_tach_eventtime = time
-        self.last_tach_freq = frequency
-        self.last_tach_rpm = frequency * 30. / self.tachometer_ppr
+        tach_rpm = frequency * 30. / self.tachometer_ppr
+
+        if abs(self.last_tach_rpm - tach_rpm) > EPSILON:
+            self.mmu.log_stepper(
+                "BLDC_TACH: freq=%.4f rpm=%.1f print_time=%.6f unit=%s"
+                % (frequency, tach_rpm, time, self.section_name)
+            )
+
+        self.last_tach_rpm = tach_rpm
         error_rpm = self.commanded_rpm - self.last_tach_rpm
 
         reason = self._get_pid_skip_reason()
@@ -311,6 +333,8 @@ class BldcTachometer:
                 self.integral_correction_pwm = max(-c, min(c, self.integral_correction_pwm + self.control_ki * norm * control_dt))
                 total_correction = max(-c, min(c, p_correction + self.integral_correction_pwm))
                 self.set_control_state('active', total_correction, error_rpm)
+        if self.control_reason != 'pid_disabled':
+            self._log_control_state(time, control_dt)
 
 class MmuGearBldc:
     """BLDC gear controller for MMU gear motion replacement. Designed to be used with a BLDC motor and external ESC for gear drive sections, with optional tachometer feedback and closed loop control."""
@@ -671,6 +695,18 @@ class MmuGearBldc:
         # Queue callback applies write-throttle policy to unify native/fallback behavior.
         self._send_pin(self.mcu_pwm_pin, value, print_time)
 
+    def _queue_pwm_if_changed(self, value, print_time):
+        if value <= EPSILON:
+            value = 0.
+            if self.last_effective_pwm <= EPSILON and self.last_pwm <= EPSILON:
+                return False
+        elif abs(value - self.last_effective_pwm) < self.PWM_WRITE_MIN_DELTA:
+            return False
+
+        self.last_effective_pwm = value
+        self._send_pin(self.mcu_pwm_pin, value, print_time)
+        return True
+
     def queue_trapzoid_move(self, move, axis_r, print_time, source):
         if move.accel_t <= EPSILON and move.cruise_t <= EPSILON and move.decel_t <= EPSILON:
             return
@@ -808,8 +844,9 @@ class MmuGearBldc:
             # extruder has stopped moving -- stop the BLDC immediately. In event-driven mode
             # (dist=None, sync_active=False) the caller holds the queue open with an INFINITY
             # descriptor, so this branch is never reached while a move is in progress.
-            if self.sync_active and abs(self.last_pwm) > EPSILON:
-                self._send_pin(self.mcu_pwm_pin, 0., None)
+            if self.sync_active:
+                self._queue_pwm_if_changed(0., None)
+                self._reset_motion_command('sync_queue_drained')
             return self.reactor.NEVER
 
         # Filter to the next-tick window (early send: ensure all candidates within MCU schedule constraint)
@@ -837,27 +874,23 @@ class MmuGearBldc:
         for idx, (desc, src) in enumerate(batch):
             is_last_in_batch = idx == len(batch) - 1
             dispatch_time = desc.print_time if desc.print_time >= current_print_time else current_print_time
-            self._log_descriptor(desc, dispatch_time)
-
             if isinstance(desc, MotionStop):
                 if is_last_in_batch:
                     self._motion_timer_running = False
-                if abs(self.last_pwm) > EPSILON:
-                    self._send_pin(self.mcu_pwm_pin, 0., dispatch_time)
+                if self._queue_pwm_if_changed(0., dispatch_time):
+                    self._log_descriptor(desc, dispatch_time)
             elif desc.pwm is not None:
                 dir_val = 1 if desc.direction > 0 else 0
                 self._send_pin(self.mcu_dir_pin, dir_val, dispatch_time)
-                self._send_pin(self.mcu_pwm_pin, desc.pwm, dispatch_time)
+                if self._queue_pwm_if_changed(desc.pwm, dispatch_time):
+                    self._log_descriptor(desc, dispatch_time)
             else:
                 speed_mm_s = desc.get_speed(current_print_time) if isinstance(desc, MotionTrapzoid) else desc.speed_mm_s
                 if abs(speed_mm_s) < EPSILON:
-                    if abs(self.last_pwm) > EPSILON:
-                        self.commanded_rpm = 0.
-                        self.commanded_source = src
-                        self.commanded_linear_speed = 0.
-                        self.last_effective_pwm = 0.
-                        self.tachometer.set_commanded(0., src)
-                        self._send_pin(self.mcu_pwm_pin, 0., dispatch_time)
+                    queued_pwm = self._queue_pwm_if_changed(0., dispatch_time)
+                    self._reset_motion_command(src)
+                    if queued_pwm:
+                        self._log_descriptor(desc, dispatch_time)
                 else:
                     forward = self._map_forward_for_gate(speed_mm_s > 0., speed_mm_s)
                     requested_rpm = 60. * abs(speed_mm_s) / self.rotation_distance
@@ -872,15 +905,12 @@ class MmuGearBldc:
                     self.commanded_source = src
                     self.commanded_linear_speed = abs(speed_mm_s)
                     self.tachometer.set_commanded(rpm, src)
+                    self.tachometer.enabled = desc.pid_enable
                     pwm = self.rpm_to_pwm(rpm)
                     effective_pwm = self.tachometer.apply_control(pwm, src)
-                    self.last_effective_pwm = effective_pwm
                     self._send_pin(self.mcu_dir_pin, int(forward), dispatch_time)
-                    self._send_pin(self.mcu_pwm_pin, effective_pwm, dispatch_time)
-                    self.tachometer.enabled = desc.pid_enable
-
-        # Remove dispatched batch from queue; let pruning handle expired descriptors naturally
-        self.motion_queue = [(d, src) for d, src in self.motion_queue if (d, src) not in batch]
+                    if self._queue_pwm_if_changed(effective_pwm, dispatch_time):
+                        self._log_descriptor(desc, dispatch_time)
 
         # Check if motion should stop (MotionStop was in batch and is last)
         if batch and isinstance(batch[-1][0], MotionStop):
@@ -888,10 +918,7 @@ class MmuGearBldc:
 
         return eventtime + self.motion_sample_time
 
-    def _reset_motion(self, state, source):
-        self.motion_state = state
-        self._stop_motion_timer()
-        self.motion_queue = []
+    def _reset_motion_command(self, source):
         self.commanded_rpm = 0.
         self.commanded_source = source
         self.commanded_linear_speed = 0.
@@ -899,6 +926,12 @@ class MmuGearBldc:
         self._last_pwm_write_print_time = 0.
         self.tachometer.stop()
         self.tachometer.enabled = False
+
+    def _reset_motion(self, state, source):
+        self.motion_state = state
+        self._stop_motion_timer()
+        self.motion_queue = []
+        self._reset_motion_command(source)
 
     def stop(self, print_time=None):
         self._reset_motion(self.MOTION_STATE_STOP, 'stop')

@@ -20,7 +20,7 @@ Produce terse diagnostic report with:
 - Root-cause hypothesis mapped to file + function + minimal fix sketch.
 
 ## Inputs
-- Primary log: `C:/git/YAMMU/Firmware/Happy-Hare/.github/skills/run-test-rig/klippy.log`
+- Primary log: `C:/git/YAMMU/Firmware/Happy-Hare/.agents/skills/run-test-rig/klippy.log`
 - Focus arg (`$args`):
   - Default: `unit0`
   - `all`: disable focus filtering in Steps 2-4

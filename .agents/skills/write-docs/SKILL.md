@@ -1,9 +1,8 @@
 ---
 name: write-docs
-description: 'Write and maintain Happy Hare MMU operation deep-dive docs. Use when asked to document MMU command behavior, motor modes, movement flow, sync semantics, BLDC interactions, defaults, and gotchas (for example: MMU_TEST_MOVE, MMU_CHECK_GATE, load/unload operations). Produces strict docs/MMU_<COMMAND>.md files and updates Agents.md only when creating a brand-new doc.'
+description: 'Write and maintain Happy Hare MMU operation deep-dive docs. Use when asked to document MMU command behavior, motor modes, movement flow, sync semantics, BLDC interactions, defaults, and gotchas (for example: MMU_TEST_MOVE, MMU_CHECK_GATE, load/unload operations). Produces strict docs/MMU_<COMMAND>.md files and updates AGENTS.md only when creating a brand-new doc.'
 argument-hint: 'MMU command to document (for example: MMU_TEST_MOVE)'
 user-invocable: true
-ag
 ---
 
 # Write Docs
@@ -20,7 +19,7 @@ Primary outcomes:
 - explain what to expect when running the operation
 - explain how and when the operation is used
 - capture defaults, constraints, and gotchas
-- keep discoverability anchors in `Agents.md` only when required
+- keep discoverability anchors in `AGENTS.md` only when required
 
 ## Strict Filename Rule
 
@@ -83,7 +82,7 @@ Use this skill when asked to:
    - No required test-rig validation section.
 
 7. **Anchor discoverability conditionally**
-   - Update `Agents.md` **only when** creating a brand-new `docs/MMU_<COMMAND>.md` file.
+   - Update `AGENTS.md` **only when** creating a brand-new `docs/MMU_<COMMAND>.md` file.
    - If updating an existing doc, do not modify anchors unless explicitly requested.
 
 ## Branching Logic
@@ -105,10 +104,10 @@ Before finalizing, confirm:
 6. Doc explains operation usage (what it is for, how to run it, when to use it).
 7. Doc states expected outcomes/observations per mode.
 8. Filename follows strict rule exactly.
-9. `Agents.md` edited only if doc is brand-new.
+9. `AGENTS.md` edited only if doc is brand-new.
 
 ## Output Contract
 
 - Primary: `docs/MMU_<COMMAND>.md`
-- Secondary: `Agents.md` update only for brand-new docs
+- Secondary: `AGENTS.md` update only for brand-new docs
 - Final summary: what was verified, where documented, unresolved ambiguities
