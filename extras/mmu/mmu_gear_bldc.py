@@ -107,7 +107,7 @@ class ProcessMoveSyncMonitor:
             self._attach_bldc(bldc)
             return True
 
-        def wrapped_process_move(hooked_self, print_time, move, ea_index):
+        def wrapped_process_move(_hooked_self, print_time, move, ea_index):
             process_move(print_time, move, ea_index)
             self._handle_process_move(print_time, move, ea_index)
 
@@ -229,7 +229,7 @@ class BldcTachometer:
         self.integral_correction_pwm = 0.
         self.control_correction_pwm = 0.
 
-    def apply_control(self, pwm, source):
+    def apply_control(self, pwm):
         if pwm <= EPSILON:
             self.set_control_state('zero_pwm', 0., 0.)
             return 0.
@@ -323,16 +323,15 @@ class BldcTachometer:
         if reason is not None:
             self.integral_correction_pwm = 0.
             self.set_control_state(reason, 0., error_rpm)
+        elif abs(error_rpm) <= self.CONTROL_DEADBAND_RPM:
+            self.set_control_state('deadband', self.control_correction_pwm, error_rpm)
         else:
-            if abs(error_rpm) <= self.CONTROL_DEADBAND_RPM:
-                self.set_control_state('deadband', self.control_correction_pwm, error_rpm)
-            else:
-                c = self.control_max_delta_pwm
-                norm = (error_rpm / self.bldc.get_effective_max_rpm()) * (self.pwm_max - self.pwm_min)
-                p_correction = max(-c, min(c, self.control_kp * norm))
-                self.integral_correction_pwm = max(-c, min(c, self.integral_correction_pwm + self.control_ki * norm * control_dt))
-                total_correction = max(-c, min(c, p_correction + self.integral_correction_pwm))
-                self.set_control_state('active', total_correction, error_rpm)
+            c = self.control_max_delta_pwm
+            norm = (error_rpm / self.bldc.get_effective_max_rpm()) * (self.pwm_max - self.pwm_min)
+            p_correction = max(-c, min(c, self.control_kp * norm))
+            self.integral_correction_pwm = max(-c, min(c, self.integral_correction_pwm + self.control_ki * norm * control_dt))
+            total_correction = max(-c, min(c, p_correction + self.integral_correction_pwm))
+            self.set_control_state('active', total_correction, error_rpm)
         if self.control_reason != 'pid_disabled':
             self._log_control_state(time, control_dt)
 
@@ -503,7 +502,7 @@ class MmuGearBldc:
 
         return normalized, None
 
-    def set_calibration_map(self, payload, source='runtime'):
+    def set_calibration_map(self, payload):
         if payload is None:
             self.calibration_map_points = []
             self.map_mode, self.map_fallback_reason = 'linear', 'map_missing'
@@ -582,7 +581,7 @@ class MmuGearBldc:
             self.stop()
             self.mmu.movequeues_wait()
 
-        ok, reason = self.set_calibration_map({'points': raw_points}, source='calibration')
+        ok, reason = self.set_calibration_map({'points': raw_points})
         if not ok:
             raise MmuError(
                 "BLDC calibration failed for [%s]: %s (valid points=%d)"
@@ -590,7 +589,8 @@ class MmuGearBldc:
             )
         return self.get_calibration_map_payload()
 
-    def supports_gate(self, gate): return gate is not None and self.first_gate <= gate < self.first_gate + self.num_gates
+    def supports_gate(self, gate):
+        return gate is not None and self.first_gate <= gate < self.first_gate + self.num_gates
 
     def _create_gcrqs(self, config):
         # Prefer native output_pin queue, then reuse espooler fallback queue for Kalico compatibility.
@@ -907,7 +907,7 @@ class MmuGearBldc:
                     self.tachometer.set_commanded(rpm, src)
                     self.tachometer.enabled = desc.pid_enable
                     pwm = self.rpm_to_pwm(rpm)
-                    effective_pwm = self.tachometer.apply_control(pwm, src)
+                    effective_pwm = self.tachometer.apply_control(pwm)
                     self._send_pin(self.mcu_dir_pin, int(forward), dispatch_time)
                     if self._queue_pwm_if_changed(effective_pwm, dispatch_time):
                         self._log_descriptor(desc, dispatch_time)
@@ -950,14 +950,13 @@ class MmuGearBldc:
 
         brake_scale = min(1., max(0., applied_pwm / max(self.pwm_max, EPSILON)))
         brake_time = max(self.BRAKE_MIN_TIME_S, brake_scale * self.brake_max_time)
-        reverse_dir = 0 if self.last_dir else 1
 
         self._reset_motion(self.MOTION_STATE_BRAKE, 'brake')
         brake_descriptor = MotionPwmDirect(print_time, self.brake_pwm, brake_time, -1)
         stop_descriptor = MotionStop(print_time + brake_time)
         self.motion_queue.append((brake_descriptor, 'brake'))
         self.motion_queue.append((stop_descriptor, 'brake'))
-        self._send_pin(self.mcu_dir_pin, 0 if reverse_dir else 1, print_time)
+        self._send_pin(self.mcu_dir_pin, self.last_dir, print_time)
         self._send_pin(self.mcu_pwm_pin, self.brake_pwm, print_time)
 
     def start_move(self, dist, speed):
@@ -1018,9 +1017,11 @@ class MmuGearBldc:
         if value > 0.:
             self.rotation_distance = value
 
-    def has_tachometer(self): return self.tachometer.has_tachometer()
+    def has_tachometer(self):
+        return self.tachometer.has_tachometer()
 
-    def get_rotation_distance(self): return self.rotation_distance
+    def get_rotation_distance(self):
+        return self.rotation_distance
 
     def get_status(self, _eventtime):
         tach_status = self.tachometer.get_status()

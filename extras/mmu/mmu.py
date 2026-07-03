@@ -3595,7 +3595,7 @@ class Mmu:
             if payload is None:
                 continue
 
-            valid, reason = bldc.set_calibration_map(payload, source='persisted')
+            valid, reason = bldc.set_calibration_map(payload)
             if not valid:
                 self.log_warning(
                     "Warning: Invalid BLDC map for %s (%s). Falling back to linear conversion"
