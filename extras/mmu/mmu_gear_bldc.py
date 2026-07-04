@@ -187,6 +187,7 @@ class BldcTachometer:
 
         self.commanded_rpm = 0.
         self.commanded_source = None
+        self.last_tach_frequency = 0.
         self.last_tach_rpm = 0.
         self.last_tach_error_rpm = 0.
         self.last_tach_eventtime = None
