@@ -19,7 +19,10 @@ menu "Other Settings"
   source "Kconfig.speeds"
 
   if !MULTI_UNIT_ENTRY_POINT
-    source "Kconfig.gear_stepper"
+    source "Kconfig.bldc"
+    if !MMU_HAS_BLDC
+      source "Kconfig.gear_stepper"
+    endif
     source "Kconfig.selector_stepper"
     source "Kconfig.selector_servo"
     source "sensors/Kconfig"

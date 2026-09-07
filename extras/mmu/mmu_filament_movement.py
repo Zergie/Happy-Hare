@@ -281,7 +281,7 @@ class MmuFilamentMovement:
                     raise
             finally:
                 if nfc is not None:
-                    self.drive().mmu_gear_stepper.rail.remove_compound_endstop(nfc[0].name)
+                    self.drive().rail.remove_compound_endstop(nfc[0].name)
 
         if outcome.ratified is False:
             # A provisional read never cleared the field once this gate's own filament
@@ -612,7 +612,7 @@ class MmuFilamentMovement:
             return None, None, None
 
         nfc_es_name = self.sensor_manager.get_gate_sensor_name(SENSOR_NFC_PREFIX, gate)
-        rail = self.drive().mmu_gear_stepper.rail
+        rail = self.drive().rail
         gate_obj = rail.get_extra_endstop(gate_es_name)  # (endstop, name) or None
         nfc_obj = rail.get_extra_endstop(nfc_es_name)
         if gate_obj is None or nfc_obj is None:
@@ -866,7 +866,7 @@ class MmuFilamentMovement:
                                 raise MmuError("could not re-park filament in gate %d after scanning - check for a jam" % gate)
                     finally:
                         if compound is not None:
-                            self.drive().mmu_gear_stepper.rail.remove_compound_endstop(compound.name)
+                            self.drive().rail.remove_compound_endstop(compound.name)
             finally:
                 for mgr, snap in active_snaps:
                     mgr.restore_active(snap)

@@ -150,6 +150,8 @@ class MoveMixin:
         speed = gcmd.get_float('SPEED', None)
         accel = gcmd.get_float('ACCEL', None) # Ignored for extruder led moves
         motor = gcmd.get('MOTOR', "gear").lower()
+        if motor == "extruder+gear":
+            motor = "synced"
 
         if endstops and endstop != 'default':
             raise gcmd.error("Can only specify ENDSTOPS= or ENDSTOP=, not both")
@@ -162,7 +164,7 @@ class MoveMixin:
         if abs(stop_on_endstop) != 1:
             raise gcmd.error("STOP_ON_ENDSTOP can only be 1 (extrude direction) or -1 (retract direction)")
 
-        drive_stepper = mmu.drive().mmu_extruder_stepper if motor == "extruder" else mmu.drive().mmu_gear_stepper
+        drive_stepper = mmu.drive().mmu_extruder_stepper if motor == "extruder" else mmu.drive()
         valid_endstops = list({
             mmu.sensor_manager.get_generic_endstop_name(name)
             for name in drive_stepper.rail.get_all_endstop_names()

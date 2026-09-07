@@ -192,6 +192,10 @@ class PrinterExtruder:
     def check_move(self, move):
         pass
 
+    def process_move(self, print_time, move, ea_index):
+        # The harness toolhead owns physical travel; this is the plugin hook boundary.
+        pass
+
     def calc_junction(self, prev_move, move):
         return move.max_cruise_v2
 

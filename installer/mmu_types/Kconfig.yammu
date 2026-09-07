@@ -1,0 +1,20 @@
+config MMU_TYPE_YAMMU_1_0
+  bool "YAMMU (BLDC)"
+  select MACRO_SELECTOR
+  select PARAM_VARIABLE_ROTATION_DISTANCES
+  help
+    Shared BLDC drive with a user-supplied gate-selection macro.
+    Set the PWM, direction and tachometer pins under Other Settings.
+
+if MMU_TYPE_YAMMU_1_0
+  if SHOW_MMU_ADDITIONS_WITH_TYPE
+    source "Kconfig.mmu_additions"
+  endif
+  source "Kconfig.capabilities"
+  config PARAM_VENDOR
+    default "YAMMU"
+  config PARAM_VERSION
+    default "1.0"
+  config PARAM_NUM_GATES
+    default 4
+endif

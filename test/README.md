@@ -103,6 +103,15 @@ The file picker is still useful when you want an even tighter edit/test loop.
 
 ### Running less than everything
 
+The BLDC controller's 88 cases use the same unittest runner and dependencies as
+the rest of the harness. Run them with `make UT=test_mmu_gear_bldc.py test` or
+`python -m unittest test.test_mmu_gear_bldc`. On Windows with Git Bash,
+`python -X utf8 -m test.run_bldc_v4` includes these cases and the BLDC integration
+regressions.
+
+BLDC timing tests use the pinned Klipper request-queue fixture in
+`test/support/klipper_output_pin.py`; no separate Klipper checkout is required.
+
 `make test` opens a picker first. Everything starts ticked, so pressing Enter runs the whole
 suite exactly as it always did — but untick the expensive files and you get a focused run:
 

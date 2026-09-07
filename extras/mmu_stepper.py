@@ -146,7 +146,7 @@ class MmuGenericRail:
 
         # Bind the wrapped stepper to the default endstop, if any
         if self.default_mcu_endstop is not None:
-            self.default_mcu_endstop.add_stepper(self.stepper)
+            self.bind_stepper(self.default_mcu_endstop, self.name)
             self.endstops.append((self.default_mcu_endstop, self.name))
 
         # Parse and bind extra selectable endstops
@@ -154,8 +154,9 @@ class MmuGenericRail:
             self.add_extra_endstop(endstop_target, endstop_name)
 
         # Expose same helpers GenericPrinterRail-style callers may expect
-        self.get_commanded_position = self.stepper.get_commanded_position
-        self.calc_position_from_coord = self.stepper.calc_position_from_coord
+        if self.stepper is not None:
+            self.get_commanded_position = self.stepper.get_commanded_position
+            self.calc_position_from_coord = self.stepper.calc_position_from_coord
 
         # Event handlers
         self.printer.register_event_handler('klippy:disconnect', self.handle_disconnect)
@@ -208,7 +209,7 @@ class MmuGenericRail:
 
 
     def get_steppers(self):
-        return [self.stepper]
+        return [self.stepper] if self.stepper is not None else []
 
 
     def get_endstops(self):
@@ -334,7 +335,7 @@ class MmuGenericRail:
         at the same time
         """
         self.extra_endstops.append((c_endstop, name))
-        c_endstop.add_stepper(self.stepper)
+        self.bind_stepper(c_endstop, name)
 
 
     def remove_compound_endstop(self, name):
@@ -349,6 +350,8 @@ class MmuGenericRail:
 
 
     def bind_stepper(self, mcu_endstop, name):
+        if self.stepper is None:
+            return
         try:
             mcu_endstop.add_stepper(self.stepper)
         except Exception as e:
@@ -1043,7 +1046,7 @@ class MmuStepper(ExtruderStepper):
 
 
     def get_steppers(self):
-        return [self.stepper]
+        return [self.stepper] if self.stepper is not None else []
 
 
     def calc_position(self, stepper_positions):

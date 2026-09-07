@@ -92,9 +92,9 @@ class MmuCalibrateGearCommand(CalibrationMixin, BaseCommand):
                 return
 
             if measured > 0:
-                mcu_stepper = mmu_unit.drive_obj(gate).mmu_gear_stepper.stepper
-                current_rd = mcu_stepper.get_rotation_distance()[0]
-                new_rd = round(current_rd * measured / length, 4)
+                drive = mmu_unit.drive_obj(gate)
+                current_rd = drive.get_rotation_distance()
+                new_rd = round(drive.calculate_rotation_distance(measured, length), 4)
                 mmu.log_always(
                     f"MMU gear stepper for gate {gate} 'rotation_distance' calculated to be {new_rd:.4f} (currently: {current_rd:.4f})"
                 )
@@ -388,7 +388,6 @@ class MmuCalibrateBowdenCommand(CalibrationMixin, BaseCommand):
                 check_gates=[gate]
             ): return
 
-        mcu_stepper = mmu_unit.drive_obj(gate).mmu_gear_stepper.stepper
         can_use_sensor = (
             mmu_unit.p.extruder_homing_endstop in [
                 SENSOR_EXTRUDER_ENTRY,

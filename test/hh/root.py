@@ -99,7 +99,12 @@ def build_overlay():
 def _link(src, dest):
     if os.path.lexists(dest):
         os.unlink(dest)
-    os.symlink(src, dest)
+    try:
+        os.symlink(src, dest)
+    except OSError as error:
+        if getattr(error, 'winerror', None) != 1314:
+            raise
+        shutil.copy2(src, dest)
 
 
 def install():

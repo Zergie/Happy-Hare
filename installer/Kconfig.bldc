@@ -1,0 +1,48 @@
+menuconfig MMU_HAS_BLDC
+  bool "BLDC filament drive"
+  default y if MMU_TYPE_YAMMU_1_0
+  help
+    Use one PWM/direction/tachometer motor for this unit instead of gear steppers.
+    Gear homing is host-polled. StallGuard gear homing is unavailable.
+
+if MMU_HAS_BLDC
+  config PIN_BLDC_PWM
+    string "BLDC PWM pin"
+    default ""
+  config PIN_BLDC_DIR
+    string "BLDC direction pin"
+    default ""
+  config PIN_BLDC_TACHOMETER
+    string "BLDC tachometer pin"
+    default ""
+  config PARAM_BLDC_ROTATION_DISTANCE
+    float "Filament mm per motor revolution"
+    default 1.0
+  config PARAM_BLDC_HARDWARE_PWM
+    boolint "Hardware PWM"
+    default y
+  config PARAM_BLDC_CYCLE_TIME
+    float "PWM cycle time (seconds)"
+    default 0.00005
+  config PARAM_BLDC_PWM_MIN
+    float "Minimum PWM"
+    default 0.2
+  config PARAM_BLDC_PWM_MAX
+    float "Maximum PWM"
+    default 1.0
+  config PARAM_BLDC_TORQUE_ASSIST_PWM
+    float "Low-speed torque assist PWM"
+    default 0.2
+  config PARAM_BLDC_SYNC_RETRACT_MIN_DISTANCE
+    float "Minimum synced retract (mm)"
+    default 1.0
+endif
+
+if MMU_TYPE_YAMMU_1_0
+  config PARAM_YAMMU_SERVO_PINS
+    string "YAMMU servo pins (one per pair of gates)"
+    array_editor ", "
+    default ""
+    help
+      Enter one qualified MCU pin per servo, in unit-local gate-pair order.
+endif

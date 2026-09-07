@@ -780,8 +780,7 @@ class Session:
         does not exist yet.
         """
         try:
-            steppers = [d.mmu_gear_stepper for d in unit.drives][:unit.num_gates]
-            return [s.stepper.get_rotation_distance()[0] for s in steppers]
+            return [drive.get_rotation_distance() for drive in unit.drives[:unit.num_gates]]
         except Exception:                           # pragma: no cover - defensive
             logging.debug('harness: no gear steppers to read rotation distance from')
             return []

@@ -103,6 +103,7 @@ class MmuUnit:
         DEF_PROFILE = MmuUnitProfile()
 
         VENDOR_PROFILES = {
+            VENDOR_YAMMU:        replace(DEF_PROFILE, selector_type=SELECTOR_MACRO),
             VENDOR_ERCF:         replace(DEF_PROFILE, selector_type=SELECTOR_LINEAR_SERVO, show_bypass=True, filament_buffer=True),
             VENDOR_TRADRACK:     replace(DEF_PROFILE, selector_type=SELECTOR_LINEAR_SERVO, variable_rotation_distances=False, filament_buffer=True),
             VENDOR_ANGRY_BEAVER: replace(DEF_PROFILE, filament_always_gripped=True),
@@ -268,96 +269,107 @@ class MmuUnit:
         # MMU Drive (Gears)
         # ---------------------------------------------------------------------------------------------------
 
-        self.multigear = False
-        if config.get('gear_steppers', None):
-            self.multigear = True
-            self.mmu_gear_names = list(config.getlist('gear_steppers'))
-            if len(self.mmu_gear_names) != self.num_gates:
-                raise config.error("gear_steppers is not the correct length, expected %d elements" % self.num_gates)
+        bldc_section = 'mmu_gear_bldc %s' % self.name
+        if config.has_section(bldc_section):
+            from .unit.mmu_bldc_drive import MmuBldcDrive
+            if config.get('gear_stepper', None) or config.get('gear_steppers', None):
+                raise config.error("Specify BLDC or gear steppers, not both, for unit %s" % self.name)
+            self.multigear = False
+            self.mmu_gear_names = [bldc_section] * self.num_gates
+            drive = MmuBldcDrive(config.getsection(bldc_section), self)
+            self.drives = [drive] * self.num_gates
+            self.drives_unique = [drive]
         else:
-            self.mmu_gear_names = [config.get('gear_stepper')] * self.num_gates
-
-        # Find the TMC controller for base gear stepper so we can fill in missing config for other matching steppers
-        # and ensure all gear steppers can be loaded
-        gear_name = self.mmu_gear_names[0]
-        gear_tmc = None
-        base_gear_tmc_chip = base_tmc_section = None
-        for chip in TMC_CHIPS:
-            base_stepper_section = f"mmu_stepper {gear_name}"
-            base_tmc_section = '%s %s' % (chip, base_stepper_section)
-            if config.has_section(base_tmc_section):
-                base_gear_tmc_chip = chip
-                gear_tmc = self.printer.load_object(config, base_tmc_section) # Load base gear stepper now
-                logging.info("MMU: Loaded: [%s]" % base_tmc_section)
-                break
-
-        if gear_tmc is None:
-            if self.mmu_vendor == VENDOR_QIDI:
-                logging.info("MMU: No software-controlled TMC for %s on QIDI mmu_unit %s" % (gear_name, self.name))
+            self.multigear = False
+            if config.get('gear_steppers', None):
+                self.multigear = True
+                self.mmu_gear_names = list(config.getlist('gear_steppers'))
+                if len(self.mmu_gear_names) != self.num_gates:
+                    raise config.error("gear_steppers is not the correct length, expected %d elements" % self.num_gates)
             else:
-                logging.warning(
-                    "MMU: Gear stepper %s on mmu_unit %s has no software-controlled TMC; "
-                    "assuming motor current and driver mode are controlled in hardware"
-                    % (gear_name, self.name))
+                self.mmu_gear_names = [config.get('gear_stepper')] * self.num_gates
 
-        # If multiple gear steppers share all possible attributes (saves repeated configuration)
-        if self.multigear:
-            for i in range(1, self.num_gates):
-                gear_name = self.mmu_gear_names[i]
-
-                stepper_section = f"mmu_stepper {gear_name}"
-                tmc_section = '%s %s' % (base_gear_tmc_chip, stepper_section)
-
-                if not config.has_section(stepper_section):
-                    raise config.error(f"Gear stepper configuration [{stepper_section}] not found for mmu_unit {self.name}")
+            # Find the TMC controller for base gear stepper so we can fill in missing config for other matching steppers
+            # and ensure all gear steppers can be loaded
+            gear_name = self.mmu_gear_names[0]
+            gear_tmc = None
+            base_gear_tmc_chip = base_tmc_section = None
+            for chip in TMC_CHIPS:
+                base_stepper_section = f"mmu_stepper {gear_name}"
+                base_tmc_section = '%s %s' % (chip, base_stepper_section)
+                if config.has_section(base_tmc_section):
+                    base_gear_tmc_chip = chip
+                    gear_tmc = self.printer.load_object(config, base_tmc_section) # Load base gear stepper now
+                    logging.info("MMU: Loaded: [%s]" % base_tmc_section)
                     break
 
-                # Share base stepper config section with extra steppers
-                for key in SHAREABLE_STEPPER_PARAMS:
-                    if not config.fileconfig.has_option(stepper_section, key) and config.fileconfig.has_option(base_stepper_section, key):
-                        base_value = config.fileconfig.get(base_stepper_section, key)
-                        if base_value:
-                            logging.info("MMU: Sharing gear stepper config %s=%s with [%s]" % (key, base_value, stepper_section))
-                            config.fileconfig.set(stepper_section, key, base_value)
-
-                # If tmc controller for this extra stepper matches the base we can fill in missing TMC config
-                if config.has_section(tmc_section):
-                    for key in SHAREABLE_TMC_PARAMS:
-                        if config.fileconfig.has_option(base_tmc_section, key) and not config.fileconfig.has_option(tmc_section, key):
-                            base_value = config.fileconfig.get(base_tmc_section, key)
-                            if base_value:
-                                logging.info("MMU: Sharing gear tmc config %s=%s with [%s]" % (key, base_value, tmc_section))
-                                config.fileconfig.set(tmc_section, key, base_value)
-                    _ = self.printer.load_object(config, tmc_section) # Load extra gear stepper now
-                    logging.info("MMU: Loaded: [%s]" % tmc_section)
+            if gear_tmc is None:
+                if self.mmu_vendor == VENDOR_QIDI:
+                    logging.info("MMU: No software-controlled TMC for %s on QIDI mmu_unit %s" % (gear_name, self.name))
                 else:
-                    # Regardless of tmc chip type, find and try to load all extra gear steppers (may be complete config on different TMC)
-                    for chip in TMC_CHIPS:
-                        alt_tmc_section = '%s %s' % (chip, stepper_section)
-                        if config.has_section(alt_tmc_section):
-                            _ = self.printer.load_object(config, alt_tmc_section)
-                            logging.info("MMU: Loaded: [%s]" % alt_tmc_section)
-                            break
+                    logging.warning(
+                        "MMU: Gear stepper %s on mmu_unit %s has no software-controlled TMC; "
+                        "assuming motor current and driver mode are controlled in hardware"
+                        % (gear_name, self.name))
 
-        # Now load the mmu_steppers and create control wrappers.
-        # 'drives' is gate-indexed and repeats the same object on a single-gear unit, so
-        # 'drives_unique' exists for anything that must touch each drive exactly once
-        self.drives = []
-        self.drives_unique = []
-        drive = None
-        for i, sname in enumerate(self.mmu_gear_names):
-            if drive is None or self.multigear:
-                section = f"mmu_stepper {sname}"
-                # Force load now to force_rail=True [aka gear = self.printer.load_object(config, section)]
-                c = config.getsection(section)
-                gear = MmuStepper(c, default_mode='manual', force_rail=True)
-                self.printer.add_object(c.get_name(), gear)
-                logging.info(f"MMU: Loaded: [{section}]")
-                drive = MmuDrive(config, self, gear, self.extruder_wrapper.homing_extruder_stepper)
-                self.drives_unique.append(drive)
+            # If multiple gear steppers share all possible attributes (saves repeated configuration)
+            if self.multigear:
+                for i in range(1, self.num_gates):
+                    gear_name = self.mmu_gear_names[i]
 
-            logging.info(f"MMU: Created: MmuDrive for gate {self.first_gate + i} using mmu_stepper {sname}")
-            self.drives.append(drive)
+                    stepper_section = f"mmu_stepper {gear_name}"
+                    tmc_section = '%s %s' % (base_gear_tmc_chip, stepper_section)
+
+                    if not config.has_section(stepper_section):
+                        raise config.error(f"Gear stepper configuration [{stepper_section}] not found for mmu_unit {self.name}")
+                        break
+
+                    # Share base stepper config section with extra steppers
+                    for key in SHAREABLE_STEPPER_PARAMS:
+                        if not config.fileconfig.has_option(stepper_section, key) and config.fileconfig.has_option(base_stepper_section, key):
+                            base_value = config.fileconfig.get(base_stepper_section, key)
+                            if base_value:
+                                logging.info("MMU: Sharing gear stepper config %s=%s with [%s]" % (key, base_value, stepper_section))
+                                config.fileconfig.set(stepper_section, key, base_value)
+
+                    # If tmc controller for this extra stepper matches the base we can fill in missing TMC config
+                    if config.has_section(tmc_section):
+                        for key in SHAREABLE_TMC_PARAMS:
+                            if config.fileconfig.has_option(base_tmc_section, key) and not config.fileconfig.has_option(tmc_section, key):
+                                base_value = config.fileconfig.get(base_tmc_section, key)
+                                if base_value:
+                                    logging.info("MMU: Sharing gear tmc config %s=%s with [%s]" % (key, base_value, tmc_section))
+                                    config.fileconfig.set(tmc_section, key, base_value)
+                        _ = self.printer.load_object(config, tmc_section) # Load extra gear stepper now
+                        logging.info("MMU: Loaded: [%s]" % tmc_section)
+                    else:
+                        # Regardless of tmc chip type, find and try to load all extra gear steppers (may be complete config on different TMC)
+                        for chip in TMC_CHIPS:
+                            alt_tmc_section = '%s %s' % (chip, stepper_section)
+                            if config.has_section(alt_tmc_section):
+                                _ = self.printer.load_object(config, alt_tmc_section)
+                                logging.info("MMU: Loaded: [%s]" % alt_tmc_section)
+                                break
+
+            # Now load the mmu_steppers and create control wrappers.
+            # 'drives' is gate-indexed and repeats the same object on a single-gear unit, so
+            # 'drives_unique' exists for anything that must touch each drive exactly once
+            self.drives = []
+            self.drives_unique = []
+            drive = None
+            for i, sname in enumerate(self.mmu_gear_names):
+                if drive is None or self.multigear:
+                    section = f"mmu_stepper {sname}"
+                    # Force load now to force_rail=True [aka gear = self.printer.load_object(config, section)]
+                    c = config.getsection(section)
+                    gear = MmuStepper(c, default_mode='manual', force_rail=True)
+                    self.printer.add_object(c.get_name(), gear)
+                    logging.info(f"MMU: Loaded: [{section}]")
+                    drive = MmuDrive(config, self, gear, self.extruder_wrapper.homing_extruder_stepper)
+                    self.drives_unique.append(drive)
+
+                logging.info(f"MMU: Created: MmuDrive for gate {self.first_gate + i} using mmu_stepper {sname}")
+                self.drives.append(drive)
 
 
         # ---------------------------------------------------------------------------------------------------
@@ -571,7 +583,7 @@ class MmuUnit:
 
                 e_type = "analog endstop"
 
-            stepper_names = ", ".join(s.name for s in steppers)
+            stepper_names = ", ".join(s.get_name() for s in steppers)
             logging.info(f"MMU: Created {e_type} on stepper {stepper_names} for {self.name} using {sensor_name}")
             return mcu_endstop
 
@@ -585,7 +597,7 @@ class MmuUnit:
             sensor_name = sensor.runout_helper.name
             lgate = int(sensor_name.split("_")[-1]) - self.first_gate
             drives = [self.drives[lgate]] if self.multigear else self.drives[:1]
-            steppers = [drive.mmu_gear_stepper for drive in drives]
+            steppers = drives
             add_sensor_endstop(sensor, steppers)
 
         # Now create the (unit) shared endstops reusing existing endstops on shared components
@@ -594,8 +606,8 @@ class MmuUnit:
             simple_sensor_name = sensor_name.split(":", 1)[-1]
 
             drives = self.drives if self.multigear else self.drives[:1]
-            steppers = [drive.mmu_gear_stepper for drive in drives]
-            stepper_names = ", ".join(s.name for s in steppers)
+            steppers = drives
+            stepper_names = ", ".join(s.get_name() for s in steppers)
 
             # We create on the shared extruder first so existing mcu_endstop can be reused
             # when multiple units shared the same toolhead and/or sync-feedback-buffer
@@ -711,8 +723,7 @@ class MmuUnit:
         if motor in ["all", "gear", "gears"]:
             drives = self.drives if motor == "gears" else [self.drives[0]]
             for d in drives:
-                s = d.mmu_gear_stepper
-                s.do_enable(on)
+                d.enable_motor(on)
 
         if motor in ["all", "selector"]:
             if on:

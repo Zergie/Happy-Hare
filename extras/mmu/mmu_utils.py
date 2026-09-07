@@ -351,7 +351,7 @@ class DebugStepperMovement:
         Create a movement debugger; when debug is False it does nothing.
         """
         self.mmu = mmu
-        self.debug = debug
+        self.debug = debug and mmu.drive().mmu_gear_stepper is not None
 
 
     def __enter__(self):

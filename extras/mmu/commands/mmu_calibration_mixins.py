@@ -332,8 +332,8 @@ class CalibrationMixin:
             mean = (float(mean_pos) + float(mean_neg)) / 2
             ratio = mean / length
 
-            mcu_stepper = mmu_unit.drive_obj(gate).mmu_gear_stepper.stepper
-            current_rd = mcu_stepper.get_rotation_distance()[0]
+            drive = mmu_unit.drive_obj(gate)
+            current_rd = drive.get_rotation_distance()
             new_rd = round(ratio * current_rd, 4)
 
             mmu.log_always(

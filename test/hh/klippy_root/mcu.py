@@ -48,6 +48,9 @@ class MCU:
     def get_name(self):
         return self._name
 
+    def min_schedule_time(self):
+        return 0.001
+
     def estimated_print_time(self, eventtime):
         return eventtime - HOST_OFFSET
 

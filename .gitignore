@@ -13,3 +13,5 @@ venv/
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+.scratch/

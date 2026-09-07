@@ -82,6 +82,22 @@ class MmuDrive():
         self._run_current_percent = percent
 
 
+    @property
+    def rail(self):
+        return self.mmu_gear_stepper.rail
+
+    def enable_motor(self, on):
+        self.mmu_gear_stepper.do_enable(on)
+
+    def get_rotation_distance(self):
+        return self.mmu_gear_stepper.stepper.get_rotation_distance()[0]
+
+    def set_rotation_distance(self, distance):
+        self.mmu_gear_stepper.stepper.set_rotation_distance(distance)
+
+    def calculate_rotation_distance(self, measured, requested):
+        return self.get_rotation_distance() * measured / requested
+
     def sync_mode(self, mode):
         prev_mode = self._sync_mode
         if mode == prev_mode:

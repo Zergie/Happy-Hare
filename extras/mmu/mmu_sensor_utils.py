@@ -600,6 +600,17 @@ class MmuCompoundEndstop:
         return any(es.query_endstop(print_time) for es in self.endstops)
 
 
+    def query_homing_endstop(self, print_time, triggered):
+        """Record the matching child when a non-stepper drive polls for homing."""
+        self._triggered_endstop = None
+        for endstop in self.endstops:
+            if bool(endstop.query_endstop(print_time)) == triggered:
+                self._triggered_endstop = endstop
+                self._last_trigger_time = print_time
+                return True
+        return False
+
+
     def home_start(self, print_time, sample_time, sample_count, rest_time, triggered):
         reactor = self._printer.get_reactor()
 

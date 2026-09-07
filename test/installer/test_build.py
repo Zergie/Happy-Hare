@@ -129,5 +129,54 @@ class TestV400Refresh(unittest.TestCase):
                 self.assertEqual(first_bytes, second_bytes)
 
 
+class TestYammuRefresh(unittest.TestCase):
+    """Generated selectors must survive preservation of user hardware."""
+
+    def test_switch_and_refresh_keep_generated_selector_and_user_hardware(self):
+        with tempfile.TemporaryDirectory() as root:
+            previous = os.path.join(root, "installed", "mmu_hardware_unit0.cfg")
+            os.makedirs(os.path.dirname(previous))
+            machine = os.path.join(root, "installed", "mmu.cfg")
+            with open(machine, "w", encoding="utf-8") as handle:
+                handle.write("[mmu_machine]\nhappy_hare_version: %s\n" % cfg.hh_version())
+            with open(previous, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "# EXCLUDE FROM CONFIG BUILDER -- IMPORTANT do not alter or remove this line. Config below is never upgraded\n"
+                    "[temperature_sensor user_chamber]\n"
+                    "sensor_type: Generic 3950\n"
+                    "sensor_pin: unit0:PA0\n"
+                )
+            for gates, pins in ((4, "unit0:PA1, unit0:PA2"),
+                                (6, "unit0:PA1, unit0:PA2, unit0:PA3")):
+                with self.subTest(gates=gates):
+                    out = os.path.join(root, str(gates))
+                    os.makedirs(out)
+                    dest = os.path.join(out, "mmu_hardware_unit0.cfg")
+                    env = dict(cfg._SINGLE_UNIT_ENV, OUT=out,
+                               F_CFG_UPGRADE_MODE="refresh")
+                    with cfg._env(env), cfg._chdir(cfg.REPO_ROOT):
+                        kconfig = cfg._kconfig("yammu-refresh-%s" % gates, {
+                            "MMU_TYPE_YAMMU_1_0": True,
+                            "PARAM_NUM_GATES": gates,
+                            "PARAM_YAMMU_SERVO_PINS": pins,
+                        })
+                        from installer import build
+                        build.build_config_file(
+                            "config/base/mmu_hardware.cfg", dest, kconfig,
+                            [machine, previous], {"PARAM_TOTAL_NUM_GATES": gates})
+                    parsed = ConfigBuilder(dest)
+                    self.assertTrue(parsed.has_section("temperature_sensor user_chamber"))
+                    for index in range(gates // 2):
+                        self.assertTrue(parsed.has_section("servo unit0_yammu_%s" % index))
+                    macro = "gcode_macro _YAMMU_SELECT_TOOL_unit0"
+                    self.assertTrue(parsed.has_section(macro))
+                    self.assertIn("gate >= %s" % gates, parsed.get(macro, "gcode"))
+                    with open(dest, encoding="utf-8") as handle:
+                        rendered = handle.read()
+                    self.assertLess(rendered.index("[" + macro + "]"),
+                                    rendered.index("# EXCLUDE FROM CONFIG BUILDER"))
+                    previous = dest
+
+
 if __name__ == "__main__":
     unittest.main()

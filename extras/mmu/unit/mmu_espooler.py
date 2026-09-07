@@ -24,7 +24,7 @@
 import logging, time
 
 # Klipper imports
-from ... import output_pin
+from ..mmu_pin_queue import MmuPinRequestQueue
 
 # Happy Hare imports
 from ..mmu_constants import *
@@ -72,11 +72,16 @@ class MmuESpooler:
         self.shutdown_value = config.getfloat('shutdown_value', 0., minval=0., maxval=self.scale) / self.scale
         start_value = config.getfloat('value', 0., minval=0., maxval=self.scale) / self.scale
 
+        # v4 templates number pins locally; retain older globally numbered sections.
+        local_pin_indexes = any(config.get('%s_0' % prefix, None) is not None
+                                for prefix in ('respool_motor_pin', 'assist_motor_pin',
+                                               'enable_motor_pin', 'assist_trigger_pin'))
         for gate in range(self.first_gate, self.first_gate + self.num_gates):
-            self.respool_motor_pin = config.get('respool_motor_pin_%d' % gate, None)
-            self.assist_motor_pin = config.get('assist_motor_pin_%d' % gate, None)
-            self.enable_motor_pin = config.get('enable_motor_pin_%d' % gate, None)
-            self.assist_trigger_pin = config.get('assist_trigger_pin_%d' % gate, None)
+            pin_gate = gate - self.first_gate if local_pin_indexes else gate
+            self.respool_motor_pin = config.get('respool_motor_pin_%d' % pin_gate, None)
+            self.assist_motor_pin = config.get('assist_motor_pin_%d' % pin_gate, None)
+            self.enable_motor_pin = config.get('enable_motor_pin_%d' % pin_gate, None)
+            self.assist_trigger_pin = config.get('assist_trigger_pin_%d' % pin_gate, None)
 
             # Setup pins
             if self.respool_motor_pin and not self._is_empty_pin(self.respool_motor_pin):
@@ -130,11 +135,7 @@ class MmuESpooler:
         self.gcrqs = {}
         for mcu_pin in self.motor_mcu_pins.values():
             mcu = mcu_pin.get_mcu()
-            # TODO Temporary workaround to allow Kalico to work since it lacks GCodeRequestQueue
-            if hasattr(output_pin, 'GCodeRequestQueue'):
-                self.gcrqs.setdefault(mcu, output_pin.GCodeRequestQueue(config, mcu, self._set_pin))
-            else:
-                self.gcrqs.setdefault(mcu, GCodeRequestQueue(config, mcu, self._set_pin))
+            self.gcrqs[mcu] = MmuPinRequestQueue.get_for_mcu(config, mcu)
 
         # Setup event handler for DC espooler motor burst operation
         self.printer.register_event_handler("mmu:espooler_burst", self._handle_espooler_burst)
@@ -474,7 +475,7 @@ class MmuESpooler:
                 estimated_print_time = mcu_pin.get_mcu().estimated_print_time(self.printer.reactor.monotonic())
                 if self.mmu.log_enabled(LOG_STEPPER):
                     self.mmu.log_stepper("ESPOOLER: --> _schedule_set_pin(name=%s, value=%s) @ print_time: %.8f" % (name, value, estimated_print_time))
-                self.gcrqs[mcu_pin.get_mcu()].send_async_request((name, value))
+                self.gcrqs[mcu_pin.get_mcu()].send((self._set_pin, (name, value)), None)
 
         # Sanity check
         if operation == ESPOOLER_OFF:

@@ -2926,7 +2926,7 @@ class MmuController(MmuFilamentMovement):
         if drive.is_synced_to_extruder():
             return
 
-        drive.mmu_gear_stepper.do_enable(False)
+        drive.enable_motor(False)
         self.log_stepper("Type-B idle gear stepper for gate %d disabled" % gate)
 
 
@@ -2937,7 +2937,7 @@ class MmuController(MmuFilamentMovement):
                 continue
             for drive in mmu_unit.drives:
                 if not drive.is_synced_to_extruder():
-                    drive.mmu_gear_stepper.do_enable(False)
+                    drive.enable_motor(False)
                     disabled_any = True
         if disabled_any:
             self.log_stepper("All type-B idle gear steppers de-energised")
